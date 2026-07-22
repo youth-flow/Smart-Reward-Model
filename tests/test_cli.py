@@ -14,10 +14,22 @@ from smart_reward.data import TrainingEdgeRecord, save_jsonl
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_public_cli_parser_uses_prorm_name() -> None:
+    parser = cli_module.build_parser()
+    assert parser.prog == "prorm"
+    assert "ProRM/ProRM+" in parser.description
+
+
 def test_formal_execution_is_explicit_not_implied_by_local_cuda_visibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in ("SLURM_JOB_ID", "SRM_GIT_COMMIT", "SRM_IMAGE_SHA256"):
+    for name in (
+        "SLURM_JOB_ID",
+        "PRORM_GIT_COMMIT",
+        "PRORM_IMAGE_SHA256",
+        "SRM_GIT_COMMIT",
+        "SRM_IMAGE_SHA256",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
     assert cli_module._formal_execution_requested() is False
@@ -46,6 +58,17 @@ def test_config_check_failure_has_nonzero_exit(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "error:" in captured.err
+
+
+def test_cli_rejects_conflicting_canonical_and_legacy_memory_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("PRORM_MEMORY_REPORT", "")
+    monkeypatch.setenv("SRM_MEMORY_REPORT", "legacy.json")
+
+    assert main(["config-check", str(ROOT / "configs" / "smoke.yaml")]) == 2
+    assert "conflicting PRORM_MEMORY_REPORT" in capsys.readouterr().err
 
 
 def test_data_check_validates_training_edge_jsonl(
@@ -143,14 +166,54 @@ def test_synthetic_check_writes_benchmark_result(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert announcement["status"] == "ok"
     assert payload["status"] == "ok"
+    assert payload["schema_version"] == "prorm-synthetic-benchmark/v1"
     assert payload["benchmark_only"] is True
     assert payload["seed"] == 7
-    assert set(payload) >= {"bt", "srm", "srm_pcg"}
+    assert set(payload) >= {"bt", "prorm_plus", "prorm_plus_pcg"}
+    assert "srm" not in payload and "srm_pcg" not in payload
 
 
+def test_closed_form_check_writes_complete_audit(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "nested" / "closed-form.json"
+
+    assert main(["closed-form-check", "--output", str(output)]) == 0
+
+    announcement = json.loads(capsys.readouterr().out)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert announcement == {"output": str(output), "status": "ok"}
+    assert payload["schema_version"] == "prorm-closed-form/v1"
+    assert [row["method"] for row in payload["audited_table"]] == [
+        "BT-RM",
+        "Aux-BT-RM",
+        "ProRM",
+        "Aux-ProRM",
+    ]
+    assert payload["natural_q0_identity"] is True
+    assert payload["three_edge_identity"] is False
+    assert payload["population_example_only"] is True
+    assert [row["beta"] for row in payload["beta_grid_local_approximation"]] == [
+        4.0,
+        8.0,
+        16.0,
+        32.0,
+        64.0,
+    ]
+    for method in ("BT-RM", "ProRM"):
+        errors = [
+            row["methods"][method]["relative_error"]
+            for row in payload["beta_grid_local_approximation"]
+        ]
+        assert all(left > right for left, right in zip(errors, errors[1:], strict=False))
+
+
+@pytest.mark.parametrize("artifact_version", [1, 2], ids=["legacy-v1", "canonical-v2"])
 def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    artifact_version: int,
 ) -> None:
     seeds = [20260722, 20260723, 20260724, 20260725, 20260726]
     paths: list[str] = []
@@ -169,8 +232,12 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
                     "selected_seed": seed,
                     "git": {"commit": "a" * 40, "dirty": False},
                     "slurm": {
-                        "SRM_IMAGE_SHA256": "b" * 64,
-                        "SRM_GIT_COMMIT": "a" * 40,
+                        ("SRM_IMAGE_SHA256" if artifact_version == 1 else "PRORM_IMAGE_SHA256"): (
+                            "b" * 64
+                        ),
+                        ("SRM_GIT_COMMIT" if artifact_version == 1 else "PRORM_GIT_COMMIT"): (
+                            "a" * 40
+                        ),
                         "SLURM_JOB_ACCOUNT": "sigroup",
                         "SLURM_JOB_PARTITION": "gpu-l20",
                     },
@@ -193,23 +260,33 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
             "gpu_models": ["NVIDIA L20"],
         }
 
-        def learner(offset: float) -> dict[str, object]:
+        def learner(offset: float, method: str) -> dict[str, object]:
+            test_metrics = {
+                "local_regret": 1.0 + offset,
+                "squared_fisher_error": 2.0 + offset,
+                "fisher_cosine": 0.5 + 0.01 * offset,
+                "pairwise_accuracy": 0.6 + 0.01 * offset,
+            }
+            if artifact_version == 2:
+                test_metrics.update(
+                    {
+                        "oracle_pairwise_nll": 0.7 + 0.01 * offset,
+                        "oracle_probability_mae": 0.2 + 0.001 * offset,
+                    }
+                )
             return {
+                "method": method,
                 "final_pcg": {"converged": True},
-                "test": {
-                    "local_regret": 1.0 + offset,
-                    "squared_fisher_error": 2.0 + offset,
-                    "fisher_cosine": 0.5 + 0.01 * offset,
-                    "pairwise_accuracy": 0.6 + 0.01 * offset,
-                },
+                "test": test_metrics,
             }
 
+        prorm_key = "srm_plus" if artifact_version == 1 else "prorm_plus"
         result = {
-            "bt_mle": learner(float(index)),
-            "srm_plus": learner(float(index) - 0.1),
+            "bt_mle": learner(float(index), "bt_mle"),
+            prorm_key: learner(float(index) - 0.1, prorm_key),
         }
         payload = {
-            "schema_version": "controlled-comparison/v1",
+            "schema_version": f"controlled-comparison/v{artifact_version}",
             "config_hash": digest,
             "seed": seed,
             "artifact_metadata_sha256": "d" * 64,
@@ -253,7 +330,7 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
         rollout_path.write_text(
             json.dumps(
                 {
-                    "schema_version": "matched-kl-rollout/v1",
+                    "schema_version": f"matched-kl-rollout/v{artifact_version}",
                     "config_hash": digest,
                     "seed": seed,
                     "artifact_metadata_sha256": "d" * 64,
@@ -268,7 +345,7 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
                     },
                     "learners": {
                         "bt_mle": rollout_learner(0.05 + index * 0.01),
-                        "srm_plus": rollout_learner(0.15 + index * 0.01),
+                        prorm_key: rollout_learner(0.15 + index * 0.01),
                     },
                     "train_oracle_values_accessed": False,
                     "raw_oracle_values_serialized": False,
@@ -295,6 +372,7 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
 
     assert json.loads(capsys.readouterr().out)["num_seeds"] == 5
     aggregate = json.loads(output.read_text(encoding="utf-8"))
+    assert aggregate["schema_version"] == "paired-seed-aggregate/v2"
     assert aggregate["num_seeds"] == 5
     assert aggregate["metrics"]["test_local_regret"]["paired_mean"] == pytest.approx(-0.1)
     assert aggregate["metrics"]["test_rollout_improvement"]["paired_mean"] == (pytest.approx(0.1))
@@ -303,6 +381,11 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
     assert len(aggregate["sources"]) == 5
     assert len(aggregate["damping_evidence"]) == 3
     assert aggregate["pre_registered_evidence"]["status"] == "not_passed"
+    first = aggregate["metrics"]["test_local_regret"]["per_seed"][0]
+    assert "prorm_plus" in first and "prorm_plus_minus_bt" in first
+    if artifact_version == 2:
+        assert "test_oracle_pairwise_nll" in aggregate["metrics"]
+        assert "test_oracle_probability_mae" in aggregate["metrics"]
 
 
 def test_damping_failure_is_preserved_as_failed_evidence() -> None:
@@ -312,7 +395,7 @@ def test_damping_failure_is_preserved_as_failed_evidence() -> None:
         return {
             "status": "ok",
             "bt_local_regret": 1.0 + seed,
-            "srm_local_regret": 0.5 + seed,
+            "prorm_plus_local_regret": 0.5 + seed,
             "pcg_converged": True,
         }
 
@@ -345,7 +428,7 @@ def test_damping_failure_is_preserved_as_failed_evidence() -> None:
             seed: {
                 "status": "ok",
                 "bt_local_regret": float(seed),
-                "srm_local_regret": float(seed),
+                "prorm_plus_local_regret": float(seed),
                 "pcg_converged": True,
             }
             for seed in seeds

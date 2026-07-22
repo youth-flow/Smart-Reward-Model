@@ -1,4 +1,4 @@
-"""Strict, orientation-aware data contracts for Smart Reward Model runs.
+"""Strict, orientation-aware data contracts for ProRM+ runs.
 
 The training edge format deliberately stores an edge in its pre-declared
 ``(left_id, right_id)`` direction.  It never converts an observation to a

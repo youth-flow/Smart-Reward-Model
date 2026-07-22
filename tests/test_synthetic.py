@@ -23,7 +23,7 @@ def test_synthetic_experiment_is_exactly_reproducible(result) -> None:
 
 def test_result_is_finite_and_contains_valid_real_diagnostics(result) -> None:
     assert result.train_misspecification_rmse > 0.0
-    for learner in (result.bt, result.srm):
+    for learner in (result.bt, result.prorm_plus):
         scalars = (
             learner.initial_train_objective,
             learner.final_train_objective,
@@ -41,7 +41,7 @@ def test_result_is_finite_and_contains_valid_real_diagnostics(result) -> None:
         assert learner.predicted_direction_fisher_norm > 0.0
         assert learner.target_direction_fisher_norm > 0.0
 
-    evidence = result.srm_pcg
+    evidence = result.prorm_plus_pcg
     assert evidence.last_train_converged
     assert evidence.evaluation_converged
     assert evidence.last_train_relative_residual <= result.config.pcg_tolerance
@@ -56,7 +56,7 @@ def test_result_is_finite_and_contains_valid_real_diagnostics(result) -> None:
         rel=1.0e-10,
         abs=1.0e-14,
     )
-    assert result.srm.final_train_objective == evidence.evaluation_dual_loss
+    assert result.prorm_plus.final_train_objective == evidence.evaluation_dual_loss
 
 
 def test_repeated_label_evidence_is_the_geometric_u_statistic(result) -> None:
@@ -98,9 +98,11 @@ def test_train_and_test_are_disjoint_and_test_size_cannot_change_training(result
     assert changed_test.bt.initial_train_objective == result.bt.initial_train_objective
     assert changed_test.bt.final_train_objective == result.bt.final_train_objective
     assert changed_test.bt.final_weight == result.bt.final_weight
-    assert changed_test.srm.initial_train_objective == result.srm.initial_train_objective
-    assert changed_test.srm.final_train_objective == result.srm.final_train_objective
-    assert changed_test.srm.final_weight == result.srm.final_weight
+    assert (
+        changed_test.prorm_plus.initial_train_objective == result.prorm_plus.initial_train_objective
+    )
+    assert changed_test.prorm_plus.final_train_objective == result.prorm_plus.final_train_objective
+    assert changed_test.prorm_plus.final_weight == result.prorm_plus.final_weight
 
 
 def test_benchmark_uses_cpu_float64_labels_and_held_out_covariance_metrics(
@@ -147,7 +149,7 @@ def test_benchmark_uses_cpu_float64_labels_and_held_out_covariance_metrics(
         num_train_prompts=12,
         num_test_prompts=8,
         bt_steps=5,
-        srm_steps=5,
+        prorm_plus_steps=5,
         microbatch_size=4,
     )
     run_synthetic_experiment(7, config)
@@ -168,7 +170,7 @@ def test_benchmark_does_not_mutate_global_torch_rng() -> None:
         num_train_prompts=8,
         num_test_prompts=6,
         bt_steps=2,
-        srm_steps=2,
+        prorm_plus_steps=2,
         microbatch_size=4,
     )
     run_synthetic_experiment(11, config)

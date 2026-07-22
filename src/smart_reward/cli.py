@@ -1,4 +1,4 @@
-"""Command-line control plane for Smart Reward Model experiments."""
+"""Command-line control plane for Prospective Reward Modeling experiments."""
 
 from __future__ import annotations
 
@@ -15,6 +15,17 @@ from pathlib import Path
 from types import ModuleType
 
 from .config import ConfigError, config_hash, load_config
+from .contracts import (
+    BT_MLE,
+    CANONICAL_LEARNERS,
+    CONTROLLED_COMPARISON_SCHEMA_V1,
+    CONTROLLED_COMPARISON_SCHEMA_V2,
+    LEGACY_SRM_PLUS,
+    MATCHED_KL_ROLLOUT_SCHEMA_V1,
+    MATCHED_KL_ROLLOUT_SCHEMA_V2,
+    PRORM_PLUS,
+    compatibility_value,
+)
 from .data import SchemaError, TrainingEdgeRecord, load_jsonl
 from .repro import atomic_write_json, build_run_manifest, collect_execution_identity
 
@@ -52,6 +63,25 @@ def _finite_result_float(value: object, *, path: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{path} must be finite")
     return result
+
+
+def _serialized_learners(
+    schema_version: object,
+    *,
+    legacy_schema: str,
+    canonical_schema: str,
+    path: Path,
+) -> tuple[str, str]:
+    """Return serialized BT/ProRM+ keys for one supported input schema."""
+
+    if schema_version == canonical_schema:
+        return CANONICAL_LEARNERS
+    if schema_version == legacy_schema:
+        return BT_MLE, LEGACY_SRM_PLUS
+    raise ValueError(
+        f"{path} has unsupported schema {schema_version!r}; "
+        f"expected {legacy_schema!r} or {canonical_schema!r}"
+    )
 
 
 def _read_json_object(path: str | Path) -> dict[str, object]:
@@ -116,8 +146,8 @@ def _run_environment_identity(
     if not isinstance(dirty, bool):
         raise ValueError(f"{path}:git.dirty must be boolean")
 
-    image = slurm.get("SRM_IMAGE_SHA256")
-    environment_commit = slurm.get("SRM_GIT_COMMIT")
+    image = compatibility_value(slurm, "PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256")
+    environment_commit = compatibility_value(slurm, "PRORM_GIT_COMMIT", "SRM_GIT_COMMIT")
     account = slurm.get("SLURM_JOB_ACCOUNT")
     partition = slurm.get("SLURM_JOB_PARTITION")
     gpus = torch_state.get("gpus")
@@ -141,7 +171,7 @@ def _run_environment_identity(
     if require_formal and not complete:
         raise ValueError(f"{path} lacks a clean, single-GPU Slurm/image/Git environment identity")
     if complete:
-        image = _lower_hex_digest(image, path=f"{path}:slurm.SRM_IMAGE_SHA256", lengths={64})
+        image = _lower_hex_digest(image, path=f"{path}:slurm.PRORM_IMAGE_SHA256", lengths={64})
     else:
         commit = None
         image = None
@@ -166,7 +196,13 @@ def _formal_execution_requested() -> bool:
 
     return any(
         bool(os.environ.get(name))
-        for name in ("SLURM_JOB_ID", "SRM_GIT_COMMIT", "SRM_IMAGE_SHA256")
+        for name in (
+            "SLURM_JOB_ID",
+            "PRORM_GIT_COMMIT",
+            "PRORM_IMAGE_SHA256",
+            "SRM_GIT_COMMIT",
+            "SRM_IMAGE_SHA256",
+        )
     )
 
 
@@ -177,7 +213,7 @@ def _start_cuda_memory_tracking() -> ModuleType:
 
     torch = importlib.import_module("torch")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
-        raise RuntimeError("SRM_MEMORY_REPORT requires exactly one visible CUDA GPU")
+        raise RuntimeError("PRORM_MEMORY_REPORT requires exactly one visible CUDA GPU")
     torch.cuda.reset_peak_memory_stats(0)
     return torch
 
@@ -303,6 +339,7 @@ def _synthetic_check(arguments: argparse.Namespace) -> int:
     from .synthetic import run_synthetic_experiment
 
     payload = asdict(run_synthetic_experiment(seed=arguments.seed))
+    payload["schema_version"] = "prorm-synthetic-benchmark/v1"
     payload["benchmark_only"] = True
     payload["status"] = "ok"
     if arguments.output is None:
@@ -312,6 +349,92 @@ def _synthetic_check(arguments: argparse.Namespace) -> int:
         destination.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(destination, payload)
         _print_json({"output": str(destination), "seed": arguments.seed, "status": "ok"})
+    return 0
+
+
+def _closed_form_check(arguments: argparse.Namespace) -> int:
+    """Emit the deterministic audited four-response ProRM calculation."""
+
+    from .closed_form import (
+        F0,
+        THREE_EDGE_DISTRIBUTION,
+        TRUE_REWARD,
+        apply_a0,
+        bt_rm_optimal_w,
+        closed_form_results,
+        exact_true_regret,
+        fisher_from_reference_policy,
+        local_prorm_regret,
+        ordered_iid_pair_distribution,
+        pair_fisher,
+        pair_reward_moment,
+        reward_vector,
+    )
+
+    def vectors_close(left: Sequence[float], right: Sequence[float]) -> bool:
+        return len(left) == len(right) and all(
+            math.isclose(float(a), float(b), rel_tol=1.0e-12, abs_tol=1.0e-12)
+            for a, b in zip(left, right, strict=True)
+        )
+
+    def matrices_close(left: Sequence[Sequence[float]], right: Sequence[Sequence[float]]) -> bool:
+        return len(left) == len(right) and all(
+            vectors_close(left_row, right_row)
+            for left_row, right_row in zip(left, right, strict=True)
+        )
+
+    audit_rewards = (
+        TRUE_REWARD,
+        reward_vector(bt_rm_optimal_w()),
+        reward_vector(3.0, 6.0),
+        (1.25, -0.75, 2.5, -4.0),
+    )
+    natural_q0 = ordered_iid_pair_distribution()
+    natural_q0_identity = matrices_close(pair_fisher(natural_q0), F0) and all(
+        vectors_close(pair_reward_moment(reward, natural_q0), apply_a0(reward))
+        for reward in audit_rewards
+    )
+    three_edge_identity = matrices_close(
+        pair_fisher(THREE_EDGE_DISTRIBUTION), fisher_from_reference_policy()
+    ) and all(
+        vectors_close(
+            pair_reward_moment(reward, THREE_EDGE_DISTRIBUTION),
+            apply_a0(reward),
+        )
+        for reward in audit_rewards
+    )
+
+    beta_grid = []
+    for beta in (4.0, 8.0, 16.0, 32.0, 64.0):
+        method_rows: dict[str, dict[str, float]] = {}
+        for method, weight in (("BT-RM", bt_rm_optimal_w()), ("ProRM", 3.0)):
+            local = local_prorm_regret(weight, beta=beta)
+            exact = exact_true_regret(weight, beta=beta)
+            method_rows[method] = {
+                "local_regret": local,
+                "exact_regret": exact,
+                "absolute_error": abs(local - exact),
+                "relative_error": abs(local - exact) / exact,
+            }
+        beta_grid.append({"beta": beta, "methods": method_rows})
+
+    payload = {
+        "schema_version": "prorm-closed-form/v1",
+        "audited_table": [asdict(row) for row in closed_form_results()],
+        "natural_q0_identity": natural_q0_identity,
+        "three_edge_identity": three_edge_identity,
+        "beta_grid_local_approximation": beta_grid,
+        "population_example_only": True,
+        "benchmark_only": True,
+        "status": "ok",
+    }
+    if arguments.output is None:
+        _print_json(payload)
+    else:
+        destination = Path(arguments.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(destination, payload)
+        _print_json({"output": str(destination), "status": "ok"})
     return 0
 
 
@@ -441,7 +564,7 @@ def _controlled_compare(arguments: argparse.Namespace) -> int:
             }
         damping_runs.append({"damping_multiplier": multiplier, "result": result})
     payload = {
-        "schema_version": "controlled-comparison/v1",
+        "schema_version": CONTROLLED_COMPARISON_SCHEMA_V2,
         "config_hash": digest,
         "seed": seed,
         "artifact_dir": str(Path(arguments.artifact_dir)),
@@ -503,7 +626,7 @@ def _load_comparison_metrics(
     dict[float, dict[int, dict[str, object]]],
 ]:
     bt_by_seed: dict[int, dict[str, float]] = {}
-    srm_by_seed: dict[int, dict[str, float]] = {}
+    prorm_plus_by_seed: dict[int, dict[str, float]] = {}
     sources: dict[int, dict[str, object]] = {}
     damping_evidence: dict[float, dict[int, dict[str, object]]] = {
         multiplier: {} for multiplier in expected_damping_multipliers
@@ -511,8 +634,16 @@ def _load_comparison_metrics(
     for raw_path in paths:
         path = Path(raw_path)
         value = _read_json_object(path)
-        if not isinstance(value, dict) or value.get("schema_version") != "controlled-comparison/v1":
-            raise ValueError(f"{path} is not a controlled-comparison/v1 result")
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} comparison result must be an object")
+        schema_version = value.get("schema_version")
+        serialized_learners = _serialized_learners(
+            schema_version,
+            legacy_schema=CONTROLLED_COMPARISON_SCHEMA_V1,
+            canonical_schema=CONTROLLED_COMPARISON_SCHEMA_V2,
+            path=path,
+        )
+        serialized_prorm_plus = serialized_learners[1]
         if value.get("config_hash") != expected_config_hash:
             raise ValueError(f"{path} config_hash does not match the aggregation config")
         artifact_identity = value.get("artifact_metadata_sha256")
@@ -578,22 +709,26 @@ def _load_comparison_metrics(
                 }
                 continue
             local_regret: dict[str, float] = {}
-            for learner_name in ("bt_mle", "srm_plus"):
-                learner_value = damping_result.get(learner_name)
+            for learner_name, serialized_name in zip(
+                CANONICAL_LEARNERS, serialized_learners, strict=True
+            ):
+                learner_value = damping_result.get(serialized_name)
                 test_value = learner_value.get("test") if isinstance(learner_value, dict) else None
                 if not isinstance(test_value, dict):
-                    raise ValueError(f"{path} damping={multiplier} is missing {learner_name}.test")
+                    raise ValueError(
+                        f"{path} damping={multiplier} is missing {serialized_name}.test"
+                    )
                 local_regret[learner_name] = _finite_result_float(
                     test_value.get("local_regret"),
-                    path=f"{path}:damping={multiplier}:{learner_name}.test.local_regret",
+                    path=f"{path}:damping={multiplier}:{serialized_name}.test.local_regret",
                 )
-            srm_value = damping_result.get("srm_plus")
-            final_pcg = srm_value.get("final_pcg") if isinstance(srm_value, dict) else None
+            prorm_value = damping_result.get(serialized_prorm_plus)
+            final_pcg = prorm_value.get("final_pcg") if isinstance(prorm_value, dict) else None
             pcg_converged = isinstance(final_pcg, dict) and final_pcg.get("converged") is True
             damping_evidence[multiplier][seed] = {
                 "status": "ok",
-                "bt_local_regret": local_regret["bt_mle"],
-                "srm_local_regret": local_regret["srm_plus"],
+                "bt_local_regret": local_regret[BT_MLE],
+                "prorm_plus_local_regret": local_regret[PRORM_PLUS],
                 "pcg_converged": pcg_converged,
             }
 
@@ -601,29 +736,51 @@ def _load_comparison_metrics(
         if not isinstance(result, dict):
             raise ValueError(f"{path} contains an invalid main result")
         learners: dict[str, dict[str, float]] = {}
-        for key in ("bt_mle", "srm_plus"):
-            learner = result.get(key)
+        for key, serialized_key in zip(CANONICAL_LEARNERS, serialized_learners, strict=True):
+            learner = result.get(serialized_key)
             test = learner.get("test") if isinstance(learner, dict) else None
             if not isinstance(test, dict):
-                raise ValueError(f"{path} is missing {key}.test metrics")
-            learners[key] = {
+                raise ValueError(f"{path} is missing {serialized_key}.test metrics")
+            learner_metrics = {
                 "test_local_regret": _finite_result_float(
-                    test.get("local_regret"), path=f"{path}:{key}.test.local_regret"
+                    test.get("local_regret"),
+                    path=f"{path}:{serialized_key}.test.local_regret",
                 ),
                 "test_squared_fisher_error": _finite_result_float(
                     test.get("squared_fisher_error"),
-                    path=f"{path}:{key}.test.squared_fisher_error",
+                    path=f"{path}:{serialized_key}.test.squared_fisher_error",
                 ),
                 "test_fisher_cosine": _finite_result_float(
-                    test.get("fisher_cosine"), path=f"{path}:{key}.test.fisher_cosine"
+                    test.get("fisher_cosine"),
+                    path=f"{path}:{serialized_key}.test.fisher_cosine",
                 ),
                 "test_pairwise_accuracy": _finite_result_float(
                     test.get("pairwise_accuracy"),
-                    path=f"{path}:{key}.test.pairwise_accuracy",
+                    path=f"{path}:{serialized_key}.test.pairwise_accuracy",
                 ),
             }
-        bt_by_seed[seed] = learners["bt_mle"]
-        srm_by_seed[seed] = learners["srm_plus"]
+            descriptive_names = ("oracle_pairwise_nll", "oracle_probability_mae")
+            has_descriptive = [name in test for name in descriptive_names]
+            if schema_version == CONTROLLED_COMPARISON_SCHEMA_V2 or any(has_descriptive):
+                if not all(has_descriptive):
+                    raise ValueError(
+                        f"{path}:{serialized_key}.test must contain both oracle descriptive metrics"
+                    )
+                learner_metrics.update(
+                    {
+                        "test_oracle_pairwise_nll": _finite_result_float(
+                            test["oracle_pairwise_nll"],
+                            path=(f"{path}:{serialized_key}.test.oracle_pairwise_nll"),
+                        ),
+                        "test_oracle_probability_mae": _finite_result_float(
+                            test["oracle_probability_mae"],
+                            path=(f"{path}:{serialized_key}.test.oracle_probability_mae"),
+                        ),
+                    }
+                )
+            learners[key] = learner_metrics
+        bt_by_seed[seed] = learners[BT_MLE]
+        prorm_plus_by_seed[seed] = learners[PRORM_PLUS]
         sources[seed] = {
             "comparison_path": str(path),
             "comparison_sha256": _sha256_file(path),
@@ -632,7 +789,7 @@ def _load_comparison_metrics(
             "run_manifest_sha256": manifest_sha,
             "environment_identity": environment_identity,
         }
-    return bt_by_seed, srm_by_seed, sources, damping_evidence
+    return bt_by_seed, prorm_plus_by_seed, sources, damping_evidence
 
 
 def _load_rollout_metrics(
@@ -644,13 +801,19 @@ def _load_rollout_metrics(
     kl_relative_tolerance: float,
 ) -> tuple[dict[int, float], dict[int, float], dict[int, dict[str, object]]]:
     bt_by_seed: dict[int, float] = {}
-    srm_by_seed: dict[int, float] = {}
+    prorm_plus_by_seed: dict[int, float] = {}
     sources: dict[int, dict[str, object]] = {}
     for raw_path in paths:
         path = Path(raw_path)
         value = _read_json_object(path)
-        if not isinstance(value, dict) or value.get("schema_version") != "matched-kl-rollout/v1":
-            raise ValueError(f"{path} is not a matched-kl-rollout/v1 result")
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} rollout result must be an object")
+        serialized_learners = _serialized_learners(
+            value.get("schema_version"),
+            legacy_schema=MATCHED_KL_ROLLOUT_SCHEMA_V1,
+            canonical_schema=MATCHED_KL_ROLLOUT_SCHEMA_V2,
+            path=path,
+        )
         if value.get("config_hash") != expected_config_hash:
             raise ValueError(f"{path} config_hash does not match the aggregation config")
         seed = value.get("seed")
@@ -693,33 +856,37 @@ def _load_rollout_metrics(
         if isinstance(num_prompts, bool) or not isinstance(num_prompts, int) or num_prompts < 2:
             raise ValueError(f"{path} has an invalid test prompt count")
         learners = value.get("learners")
-        if not isinstance(learners, dict) or set(learners) != {"bt_mle", "srm_plus"}:
-            raise ValueError(f"{path} must contain exactly BT-MLE and SRM+ rollout results")
+        if not isinstance(learners, dict) or set(learners) != set(serialized_learners):
+            raise ValueError(
+                f"{path} must contain exactly the serialized BT-MLE and ProRM+ rollout results"
+            )
         parsed: dict[str, float] = {}
-        for learner_name in ("bt_mle", "srm_plus"):
-            learner = learners[learner_name]
+        for learner_name, serialized_name in zip(
+            CANONICAL_LEARNERS, serialized_learners, strict=True
+        ):
+            learner = learners[serialized_name]
             direction = learner.get("direction") if isinstance(learner, dict) else None
             direction_pcg = direction.get("pcg") if isinstance(direction, dict) else None
             if not isinstance(direction_pcg, dict) or direction_pcg.get("converged") is not True:
-                raise ValueError(f"{path} {learner_name} policy-direction PCG did not converge")
+                raise ValueError(f"{path} {serialized_name} policy-direction PCG did not converge")
             update = learner.get("measured_kl_update") if isinstance(learner, dict) else None
             if (
                 not isinstance(update, dict)
                 or update.get("converged") is not True
                 or update.get("applied") is not True
             ):
-                raise ValueError(f"{path} {learner_name} measured-KL update did not converge")
+                raise ValueError(f"{path} {serialized_name} measured-KL update did not converge")
             target_kl = _finite_result_float(
-                update.get("target_kl"), path=f"{path}:{learner_name}.target_kl"
+                update.get("target_kl"), path=f"{path}:{serialized_name}.target_kl"
             )
             applied_kl = _finite_result_float(
                 update.get("applied_measured_kl"),
-                path=f"{path}:{learner_name}.applied_measured_kl",
+                path=f"{path}:{serialized_name}.applied_measured_kl",
             )
             if target_kl != expected_kl:
-                raise ValueError(f"{path} {learner_name} used the wrong KL target")
+                raise ValueError(f"{path} {serialized_name} used the wrong KL target")
             if abs(applied_kl - expected_kl) / expected_kl > kl_relative_tolerance:
-                raise ValueError(f"{path} {learner_name} did not meet the measured-KL tolerance")
+                raise ValueError(f"{path} {serialized_name} did not meet the measured-KL tolerance")
             paired = (
                 learner.get("paired_improvement_over_zero_b_reference")
                 if isinstance(learner, dict)
@@ -728,17 +895,17 @@ def _load_rollout_metrics(
             if not isinstance(paired, dict) or paired.get("schema_version") != (
                 "oracle-rollout-improvement/v1"
             ):
-                raise ValueError(f"{path} has invalid {learner_name} paired improvement")
+                raise ValueError(f"{path} has invalid {serialized_name} paired improvement")
             if paired.get("num_pairs") != num_prompts:
-                raise ValueError(f"{path} {learner_name} uncertainty is not prompt-level")
+                raise ValueError(f"{path} {serialized_name} uncertainty is not prompt-level")
             if paired.get("significance_claimed") is not False:
-                raise ValueError(f"{path} {learner_name} must not claim significance")
+                raise ValueError(f"{path} {serialized_name} must not claim significance")
             parsed[learner_name] = _finite_result_float(
                 paired.get("mean_difference"),
-                path=f"{path}:{learner_name}.paired_improvement.mean_difference",
+                path=f"{path}:{serialized_name}.paired_improvement.mean_difference",
             )
-        bt_by_seed[seed] = parsed["bt_mle"]
-        srm_by_seed[seed] = parsed["srm_plus"]
+        bt_by_seed[seed] = parsed[BT_MLE]
+        prorm_plus_by_seed[seed] = parsed[PRORM_PLUS]
         sources[seed] = {
             **comparison_source,
             "rollout_path": str(path),
@@ -750,7 +917,7 @@ def _load_rollout_metrics(
             raise ValueError(f"{path} accessed train oracle values")
         if value.get("raw_oracle_values_serialized") is not False:
             raise ValueError(f"{path} serialized raw oracle values")
-    return bt_by_seed, srm_by_seed, sources
+    return bt_by_seed, prorm_plus_by_seed, sources
 
 
 def _aggregate_damping_evidence(
@@ -771,7 +938,7 @@ def _aggregate_damping_evidence(
             raise ValueError(f"damping={multiplier} seed set does not match config run.seeds")
         failures: list[dict[str, object]] = []
         bt: dict[int, dict[str, float]] = {}
-        srm: dict[int, dict[str, float]] = {}
+        prorm_plus: dict[int, dict[str, float]] = {}
         for seed in sorted(declared_seeds):
             record = per_seed[seed]
             if record.get("status") != "ok" or record.get("pcg_converged") is not True:
@@ -779,7 +946,7 @@ def _aggregate_damping_evidence(
                 failures.append({"seed": seed, **record})
                 continue
             bt[seed] = {"test_local_regret": float(record["bt_local_regret"])}
-            srm[seed] = {"test_local_regret": float(record["srm_local_regret"])}
+            prorm_plus[seed] = {"test_local_regret": float(record["prorm_plus_local_regret"])}
         if failures:
             if multiplier != 1.0:
                 sensitivity_nonreversal = False
@@ -795,7 +962,7 @@ def _aggregate_damping_evidence(
             continue
         aggregate = aggregate_paired_metrics(
             bt,
-            srm,
+            prorm_plus,
             bootstrap_seed=bootstrap_seed,
             num_resamples=bootstrap_resamples,
         ).to_dict()
@@ -870,14 +1037,19 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         raise ConfigError("aggregate-results requires a config with run.seeds")
     digest = config_hash(config)
     damping_multipliers = _damping_multipliers(config)
-    bt_by_seed, srm_by_seed, comparison_sources, damping_evidence = _load_comparison_metrics(
+    (
+        bt_by_seed,
+        prorm_plus_by_seed,
+        comparison_sources,
+        damping_evidence,
+    ) = _load_comparison_metrics(
         arguments.results,
         expected_config_hash=digest,
         expected_damping_multipliers=damping_multipliers,
     )
     if set(bt_by_seed) != set(int(seed) for seed in declared):
         raise ValueError("comparison result seeds must exactly match config run.seeds")
-    bt_rollout, srm_rollout, sources = _load_rollout_metrics(
+    bt_rollout, prorm_plus_rollout, sources = _load_rollout_metrics(
         arguments.rollouts,
         expected_config_hash=digest,
         comparison_sources=comparison_sources,
@@ -900,12 +1072,18 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         )
     for seed in bt_by_seed:
         bt_by_seed[seed]["test_rollout_improvement"] = bt_rollout[seed]
-        srm_by_seed[seed]["test_rollout_improvement"] = srm_rollout[seed]
+        prorm_plus_by_seed[seed]["test_rollout_improvement"] = prorm_plus_rollout[seed]
     evaluation = config["evaluation"]
+    descriptive_directions = {
+        name: "lower_is_better"
+        for name in ("test_oracle_pairwise_nll", "test_oracle_probability_mae")
+        if all(name in metrics for metrics in bt_by_seed.values())
+    }
     aggregate = aggregate_paired_metrics(
         bt_by_seed,
-        srm_by_seed,
+        prorm_plus_by_seed,
         directions={
+            **descriptive_directions,
             "test_pairwise_accuracy": "higher_is_better",
             "test_rollout_improvement": "higher_is_better",
         },
@@ -946,8 +1124,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Construct the command-line parser without touching network or GPU state."""
 
     parser = argparse.ArgumentParser(
-        prog="smart-reward",
-        description="Validated controls and experiment entry points for Smart Reward Model.",
+        prog="prorm",
+        description="Validated controls and experiment entry points for ProRM/ProRM+.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -1004,6 +1182,17 @@ def build_parser() -> argparse.ArgumentParser:
     synthetic_parser.add_argument("--output", "-o", help="atomically write JSON here")
     synthetic_parser.set_defaults(handler=_synthetic_check)
 
+    closed_form_parser = subparsers.add_parser(
+        "closed-form-check",
+        help="emit the audited four-response population ProRM calculation",
+    )
+    closed_form_parser.add_argument(
+        "--output",
+        "-o",
+        help="atomically write JSON here instead of printing the full audit",
+    )
+    closed_form_parser.set_defaults(handler=_closed_form_check)
+
     materialize_parser = subparsers.add_parser(
         "controlled-materialize",
         help="materialize pinned Phase-1 candidates, geometry, oracle labels, and features",
@@ -1021,7 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare_parser = subparsers.add_parser(
         "controlled-compare",
-        help="run paired fixed-step BT/SRM+ training over an integrity-checked artifact",
+        help="run paired fixed-step BT/ProRM+ training over an integrity-checked artifact",
     )
     compare_parser.add_argument("config")
     compare_parser.add_argument("artifact_dir")
@@ -1031,13 +1220,13 @@ def build_parser() -> argparse.ArgumentParser:
     compare_parser.add_argument(
         "--run-manifest",
         required=True,
-        help="selected-seed smart-reward-run/v1 manifest to bind into the result",
+        help="selected-seed compatibility manifest to bind into the result",
     )
     compare_parser.set_defaults(handler=_controlled_compare)
 
     rollout_parser = subparsers.add_parser(
         "controlled-rollout",
-        help="match BT/SRM policy updates to measured KL and run paired oracle rollouts",
+        help="match BT/ProRM+ policy updates to measured KL and run paired oracle rollouts",
     )
     rollout_parser.add_argument("config")
     rollout_parser.add_argument("artifact_dir")
@@ -1063,7 +1252,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--rollouts",
         nargs="+",
         required=True,
-        help="matched-kl-rollout/v1 JSON files, one for every declared seed",
+        help="matched-kl-rollout/v1 or v2 JSON files, one for every declared seed",
     )
     aggregate_parser.set_defaults(handler=_aggregate_results)
     return parser
@@ -1074,10 +1263,18 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = build_parser()
     arguments = parser.parse_args(argv)
-    memory_destination = os.environ.get("SRM_MEMORY_REPORT")
+    memory_destination: str | None = None
     torch: ModuleType | None = None
     status = "ok"
     try:
+        raw_memory_destination = compatibility_value(
+            os.environ,
+            "PRORM_MEMORY_REPORT",
+            "SRM_MEMORY_REPORT",
+        )
+        if raw_memory_destination is not None and not isinstance(raw_memory_destination, str):
+            raise TypeError("PRORM_MEMORY_REPORT must be a string path")
+        memory_destination = raw_memory_destination
         torch = _start_cuda_memory_tracking() if memory_destination else None
         exit_code = int(arguments.handler(arguments))
         status = "ok" if exit_code == 0 else "error"

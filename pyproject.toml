@@ -4,18 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-reward-model"
-version = "0.1.0"
-description = "Fisher-GMM Smart Reward Model for policy-relevant preference learning"
+version = "0.2.0"
+description = "Prospective Reward Modeling by downstream policy regret"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Smart Reward Model contributors" }]
+authors = [{ name = "Prospective Reward Modeling contributors" }]
 dependencies = [
   "pyyaml>=6,<7",
   "torch>=2.4,<3",
 ]
 
 [project.scripts]
+prorm = "smart_reward.cli:main"
 smart-reward = "smart_reward.cli:main"
+
+[project.urls]
+Repository = "https://github.com/youth-flow/Smart-Reward-Model"
 
 [project.optional-dependencies]
 llm = [

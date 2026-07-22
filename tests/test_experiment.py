@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import smart_reward.experiment as experiment_module
 from smart_reward.config import load_config
@@ -168,19 +169,41 @@ def test_relative_damping_fair_initialization_and_json_contract() -> None:
     )
     assert result.train_absolute_damping == pytest.approx(expected_train_damping)
     assert result.bt_mle.validation.absolute_damping == pytest.approx(expected_validation_damping)
-    assert result.srm_plus.validation.absolute_damping == pytest.approx(expected_validation_damping)
-    assert result.bt_mle.initial_head_sha256 == result.srm_plus.initial_head_sha256
+    assert result.prorm_plus.validation.absolute_damping == pytest.approx(
+        expected_validation_damping
+    )
+    assert result.bt_mle.initial_head_sha256 == result.prorm_plus.initial_head_sha256
     assert result.bt_mle.head_sha256 != result.bt_mle.initial_head_sha256
-    assert result.srm_plus.head_sha256 != result.srm_plus.initial_head_sha256
+    assert result.prorm_plus.head_sha256 != result.prorm_plus.initial_head_sha256
     assert len(result.bt_mle.head_weight) == experiment.train.reward_dimension
-    assert len(result.srm_plus.head_weight) == experiment.train.reward_dimension
-    assert result.srm_plus.final_pcg is not None
-    assert result.srm_plus.final_pcg.converged
+    assert len(result.prorm_plus.head_weight) == experiment.train.reward_dimension
+    assert result.prorm_plus.final_pcg is not None
+    assert result.prorm_plus.final_pcg.converged
     assert 0.0 <= result.bt_mle.test.pairwise_accuracy <= 1.0
-    assert 0.0 <= result.srm_plus.test.pairwise_accuracy <= 1.0
+    assert 0.0 <= result.prorm_plus.test.pairwise_accuracy <= 1.0
+    assert result.prorm_plus.test.oracle_pairwise_nll >= 0.0
+    assert 0.0 <= result.prorm_plus.test.oracle_probability_mae <= 1.0
     assert not result.heldout_used_for_training
-    assert not result.srm_win_guaranteed
-    json.dumps(result.to_dict(), allow_nan=False, sort_keys=True)
+    assert not result.prorm_plus_win_guaranteed
+    payload = result.to_dict()
+    assert "prorm_plus" in payload and "srm_plus" not in payload
+    assert "prorm_plus_win_guaranteed" in payload and "srm_win_guaranteed" not in payload
+    json.dumps(payload, allow_nan=False, sort_keys=True)
+
+    pairs = torch.combinations(torch.arange(experiment.test.num_candidates), r=2)
+    head = torch.tensor(result.prorm_plus.head_weight, dtype=torch.float64)
+    predicted = experiment.test.reward_features @ head
+    predicted_margins = predicted[:, pairs[:, 0]] - predicted[:, pairs[:, 1]]
+    target_margins = (
+        experiment.test.true_rewards[:, pairs[:, 0]] - experiment.test.true_rewards[:, pairs[:, 1]]
+    )
+    oracle_probabilities = torch.sigmoid(target_margins)
+    assert result.prorm_plus.test.oracle_pairwise_nll == pytest.approx(
+        F.binary_cross_entropy_with_logits(predicted_margins, oracle_probabilities).item()
+    )
+    assert result.prorm_plus.test.oracle_probability_mae == pytest.approx(
+        torch.mean(torch.abs(torch.sigmoid(predicted_margins) - oracle_probabilities)).item()
+    )
 
     assert config.weight_decay == 0.0
     with pytest.raises(TypeError):
@@ -190,24 +213,24 @@ def test_relative_damping_fair_initialization_and_json_contract() -> None:
 def test_runner_is_deterministic_finite_and_calls_both_real_trainers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = {"bt": 0, "srm": 0}
+    calls = {"bt": 0, "prorm_plus": 0}
     original_bt_fit = experiment_module.BTMLETrainer.fit
-    original_srm_fit = experiment_module.SRMPlusTrainer.fit
+    original_prorm_fit = experiment_module.ProRMPlusTrainer.fit
 
     def counted_bt_fit(self: object, steps: int) -> object:
         calls["bt"] += 1
         return original_bt_fit(self, steps)
 
-    def counted_srm_fit(self: object, steps: int) -> object:
-        calls["srm"] += 1
-        return original_srm_fit(self, steps)
+    def counted_prorm_fit(self: object, steps: int) -> object:
+        calls["prorm_plus"] += 1
+        return original_prorm_fit(self, steps)
 
     monkeypatch.setattr(experiment_module.BTMLETrainer, "fit", counted_bt_fit)
-    monkeypatch.setattr(experiment_module.SRMPlusTrainer, "fit", counted_srm_fit)
+    monkeypatch.setattr(experiment_module.ProRMPlusTrainer, "fit", counted_prorm_fit)
     first = run_feature_experiment(_experiment(), _config())
     second = run_feature_experiment(_experiment(), _config())
     assert first == second
-    assert calls == {"bt": 2, "srm": 2}
+    assert calls == {"bt": 2, "prorm_plus": 2}
     assert math_is_finite_tree(first.to_dict())
 
 
@@ -235,13 +258,13 @@ def test_heldout_targets_cannot_change_training() -> None:
     altered_result = run_feature_experiment(altered, _config())
 
     assert original_result.bt_mle.head_sha256 == altered_result.bt_mle.head_sha256
-    assert original_result.srm_plus.head_sha256 == altered_result.srm_plus.head_sha256
+    assert original_result.prorm_plus.head_sha256 == altered_result.prorm_plus.head_sha256
     assert (
         original_result.bt_mle.final_train_objective == altered_result.bt_mle.final_train_objective
     )
     assert (
-        original_result.srm_plus.final_train_objective
-        == altered_result.srm_plus.final_train_objective
+        original_result.prorm_plus.final_train_objective
+        == altered_result.prorm_plus.final_train_objective
     )
     assert original_result.bt_mle.test.local_regret != altered_result.bt_mle.test.local_regret
 

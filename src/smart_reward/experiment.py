@@ -5,8 +5,8 @@ oracle construction, and repeated-label sampling must happen upstream.  The
 training schema cannot carry evaluation rewards, and validation/test prompts are
 used only after both heads have completed the same fixed number of updates.
 
-The runner reports the observed BT-MLE and SRM+ outcomes.  It does **not** encode
-or imply a guarantee that SRM+ wins on any particular finite sample.
+The runner reports the observed BT-MLE and ProRM+ outcomes.  It does **not** encode
+or imply a guarantee that ProRM+ wins on any particular finite sample.
 """
 
 from __future__ import annotations
@@ -18,15 +18,17 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 
+from .contracts import BT_MLE, PRORM_PLUS, canonical_method
 from .metrics import local_regret, natural_direction_metrics
 from .training import (
     BTMLETrainer,
     BTMLETrainingConfig,
     FeatureTrainingBatch,
     FrozenFeatureLinearReward,
-    SRMPlusTrainer,
-    SRMPlusTrainingConfig,
+    ProRMPlusTrainer,
+    ProRMPlusTrainingConfig,
 )
 
 _INTEGER_DTYPES = {
@@ -359,6 +361,8 @@ class HeldOutPolicyMetrics:
     squared_fisher_error: float
     fisher_cosine: float | None
     pairwise_accuracy: float
+    oracle_pairwise_nll: float
+    oracle_probability_mae: float
     predicted_fisher_norm: float
     target_fisher_norm: float
 
@@ -368,6 +372,8 @@ class HeldOutPolicyMetrics:
             "absolute_damping",
             "local_regret",
             "squared_fisher_error",
+            "oracle_pairwise_nll",
+            "oracle_probability_mae",
             "predicted_fisher_norm",
             "target_fisher_norm",
         ):
@@ -383,11 +389,14 @@ class HeldOutPolicyMetrics:
         accuracy = float(self.pairwise_accuracy)
         if not math.isfinite(accuracy) or not 0.0 <= accuracy <= 1.0:
             raise ValueError("pairwise_accuracy must be finite and lie in [0, 1]")
+        probability_mae = float(self.oracle_probability_mae)
+        if not 0.0 <= probability_mae <= 1.0:
+            raise ValueError("oracle_probability_mae must lie in [0, 1]")
 
 
 @dataclass(frozen=True)
 class PCGEvidence:
-    """JSON-safe evidence for the final full-data SRM+ linear solve."""
+    """JSON-safe evidence for the final full-data ProRM+ linear solve."""
 
     iterations: int
     residual_norm: float
@@ -424,8 +433,7 @@ class FeatureLearnerResult:
     final_pcg: PCGEvidence | None
 
     def __post_init__(self) -> None:
-        if self.method not in {"bt_mle", "srm_plus"}:
-            raise ValueError("method must be 'bt_mle' or 'srm_plus'")
+        canonical_method(self.method)
         for name in ("initial_train_objective", "final_train_objective"):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0.0:
@@ -444,10 +452,10 @@ class FeatureLearnerResult:
             self.test, HeldOutPolicyMetrics
         ):
             raise TypeError("validation and test must be HeldOutPolicyMetrics")
-        if self.method == "bt_mle" and self.final_pcg is not None:
+        if self.method == BT_MLE and self.final_pcg is not None:
             raise ValueError("BT-MLE must not report PCG evidence")
-        if self.method == "srm_plus" and not isinstance(self.final_pcg, PCGEvidence):
-            raise TypeError("SRM+ must report final PCG evidence")
+        if self.method == PRORM_PLUS and not isinstance(self.final_pcg, PCGEvidence):
+            raise TypeError("ProRM+ must report final PCG evidence")
 
 
 @dataclass(frozen=True)
@@ -457,24 +465,36 @@ class FeatureExperimentResult:
     config: FeatureExperimentConfig
     train_absolute_damping: float
     bt_mle: FeatureLearnerResult
-    srm_plus: FeatureLearnerResult
+    prorm_plus: FeatureLearnerResult
     heldout_used_for_training: bool = field(default=False, init=False)
-    srm_win_guaranteed: bool = field(default=False, init=False)
+    prorm_plus_win_guaranteed: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.config, FeatureExperimentConfig):
             raise TypeError("config must be FeatureExperimentConfig")
         _finite_positive("train_absolute_damping", self.train_absolute_damping)
         if not isinstance(self.bt_mle, FeatureLearnerResult) or not isinstance(
-            self.srm_plus, FeatureLearnerResult
+            self.prorm_plus, FeatureLearnerResult
         ):
-            raise TypeError("bt_mle and srm_plus must be FeatureLearnerResult objects")
-        if self.bt_mle.method != "bt_mle" or self.srm_plus.method != "srm_plus":
+            raise TypeError("bt_mle and prorm_plus must be FeatureLearnerResult objects")
+        if self.bt_mle.method != BT_MLE or self.prorm_plus.method != PRORM_PLUS:
             raise ValueError("learner results are assigned to the wrong method")
-        if self.bt_mle.initial_head_sha256 != self.srm_plus.initial_head_sha256:
+        if self.bt_mle.initial_head_sha256 != self.prorm_plus.initial_head_sha256:
             raise ValueError("both learners must have exactly the same initialization")
-        if self.heldout_used_for_training or self.srm_win_guaranteed:
+        if self.heldout_used_for_training or self.prorm_plus_win_guaranteed:
             raise ValueError("the controlled protocol cannot claim leakage or a guaranteed win")
+
+    @property
+    def srm_plus(self) -> FeatureLearnerResult:
+        """Compatibility view of the canonical :attr:`prorm_plus` result."""
+
+        return self.prorm_plus
+
+    @property
+    def srm_win_guaranteed(self) -> bool:
+        """Compatibility view of :attr:`prorm_plus_win_guaranteed`."""
+
+        return self.prorm_plus_win_guaranteed
 
     def to_dict(self) -> dict[str, Any]:
         """Return a nested structure accepted by strict JSON encoders."""
@@ -542,6 +562,14 @@ def _heldout_metrics(
     target_margins = (
         split.true_rewards[:, candidate_pairs[:, 0]] - split.true_rewards[:, candidate_pairs[:, 1]]
     )
+    oracle_probabilities = torch.sigmoid(target_margins)
+    predicted_probabilities = torch.sigmoid(predicted_margins)
+    oracle_pairwise_nll = F.binary_cross_entropy_with_logits(
+        predicted_margins,
+        oracle_probabilities,
+        reduction="mean",
+    )
+    oracle_probability_mae = torch.mean(torch.abs(predicted_probabilities - oracle_probabilities))
     identifiable = target_margins != 0.0
     if not bool(identifiable.any()):
         raise ValueError("held-out targets contain no identifiable candidate ordering")
@@ -558,13 +586,15 @@ def _heldout_metrics(
         squared_fisher_error=float(directions.squared_fisher_error.item()),
         fisher_cosine=cosine,
         pairwise_accuracy=pairwise_accuracy,
+        oracle_pairwise_nll=float(oracle_pairwise_nll.item()),
+        oracle_probability_mae=float(oracle_probability_mae.item()),
         predicted_fisher_norm=float(directions.predicted_fisher_norm.item()),
         target_fisher_norm=float(directions.target_fisher_norm.item()),
     )
 
 
 class FeatureExperimentRunner:
-    """Run the fixed-step BT-MLE/SRM+ comparison without held-out selection."""
+    """Run the fixed-step BT-MLE/ProRM+ comparison without held-out selection."""
 
     def __init__(
         self,
@@ -584,7 +614,7 @@ class FeatureExperimentRunner:
 
         Validation is descriptive here: it cannot select a checkpoint, change
         the fixed step count, or tune either learner inside this call.  Reported
-        comparisons are empirical outcomes and never a guaranteed SRM+ win.
+        comparisons are empirical outcomes and never a guaranteed ProRM+ win.
         """
 
         train = self.experiment.train
@@ -598,11 +628,11 @@ class FeatureExperimentRunner:
             device=train.reward_features.device,
         )
         bt_model = FrozenFeatureLinearReward(train.reward_dimension, zero)
-        srm_model = FrozenFeatureLinearReward(train.reward_dimension, zero)
-        if not torch.equal(bt_model.weight.detach(), srm_model.weight.detach()):
+        prorm_model = FrozenFeatureLinearReward(train.reward_dimension, zero)
+        if not torch.equal(bt_model.weight.detach(), prorm_model.weight.detach()):
             raise RuntimeError("fair initialization invariant failed")
         bt_initial_hash = _head_sha256(bt_model.weight)
-        srm_initial_hash = _head_sha256(srm_model.weight)
+        prorm_initial_hash = _head_sha256(prorm_model.weight)
 
         bt_trainer = BTMLETrainer(
             bt_model,
@@ -617,10 +647,10 @@ class FeatureExperimentRunner:
         )
         bt_initial_objective = bt_trainer.evaluate()
 
-        srm_trainer = SRMPlusTrainer(
-            srm_model,
+        prorm_trainer = ProRMPlusTrainer(
+            prorm_model,
             training_batch,
-            SRMPlusTrainingConfig(
+            ProRMPlusTrainingConfig(
                 learning_rate=config.learning_rate,
                 optimizer="adamw",
                 weight_decay=0.0,
@@ -635,16 +665,16 @@ class FeatureExperimentRunner:
                 require_pcg_convergence=True,
             ),
         )
-        srm_initial_objective = srm_trainer.evaluate(use_warm_start=False).dual_loss
+        prorm_initial_objective = prorm_trainer.evaluate(use_warm_start=False).dual_loss
 
         # No validation/test tensor is read before both fixed-step fits finish.
         bt_trainer.fit(config.outer_steps)
-        srm_trainer.fit(config.outer_steps)
+        prorm_trainer.fit(config.outer_steps)
         bt_final_objective = bt_trainer.evaluate()
-        srm_final = srm_trainer.evaluate()
+        prorm_final = prorm_trainer.evaluate()
 
         bt_result = FeatureLearnerResult(
-            method="bt_mle",
+            method=BT_MLE,
             initial_train_objective=bt_initial_objective,
             final_train_objective=bt_final_objective,
             initial_head_sha256=bt_initial_hash,
@@ -654,27 +684,27 @@ class FeatureExperimentRunner:
             test=_heldout_metrics(bt_model, self.experiment.test, config),
             final_pcg=None,
         )
-        srm_result = FeatureLearnerResult(
-            method="srm_plus",
-            initial_train_objective=srm_initial_objective,
-            final_train_objective=srm_final.dual_loss,
-            initial_head_sha256=srm_initial_hash,
-            head_sha256=_head_sha256(srm_model.weight),
-            head_weight=tuple(float(value) for value in srm_model.weight.detach().cpu()),
-            validation=_heldout_metrics(srm_model, self.experiment.validation, config),
-            test=_heldout_metrics(srm_model, self.experiment.test, config),
+        prorm_result = FeatureLearnerResult(
+            method=PRORM_PLUS,
+            initial_train_objective=prorm_initial_objective,
+            final_train_objective=prorm_final.dual_loss,
+            initial_head_sha256=prorm_initial_hash,
+            head_sha256=_head_sha256(prorm_model.weight),
+            head_weight=tuple(float(value) for value in prorm_model.weight.detach().cpu()),
+            validation=_heldout_metrics(prorm_model, self.experiment.validation, config),
+            test=_heldout_metrics(prorm_model, self.experiment.test, config),
             final_pcg=PCGEvidence(
-                iterations=srm_final.pcg_iterations,
-                residual_norm=srm_final.pcg_residual_norm,
-                relative_residual=srm_final.pcg_relative_residual,
-                converged=srm_final.pcg_converged,
+                iterations=prorm_final.pcg_iterations,
+                residual_norm=prorm_final.pcg_residual_norm,
+                relative_residual=prorm_final.pcg_relative_residual,
+                converged=prorm_final.pcg_converged,
             ),
         )
         return FeatureExperimentResult(
             config=config,
             train_absolute_damping=train_damping,
             bt_mle=bt_result,
-            srm_plus=srm_result,
+            prorm_plus=prorm_result,
         )
 
 

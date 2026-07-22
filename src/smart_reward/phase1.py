@@ -31,6 +31,7 @@ import torch
 
 from .annotations import sample_geometric_repeated_labels
 from .config import config_hash, validate_config
+from .contracts import compatibility_value
 from .data import (
     DEFAULT_CONTINUATION_PROBABILITY,
     CandidateNode,
@@ -531,15 +532,17 @@ def _producer_identity_from_environment() -> dict[str, str]:
     """Read only formal-run producer digests; never snapshot the environment."""
 
     result: dict[str, str] = {}
-    for environment_name, evidence_name, lengths in (
-        ("SRM_GIT_COMMIT", "git_commit", {40, 64}),
-        ("SRM_IMAGE_SHA256", "image_sha256", {64}),
+    for canonical_name, legacy_name, evidence_name, lengths in (
+        ("PRORM_GIT_COMMIT", "SRM_GIT_COMMIT", "git_commit", {40, 64}),
+        ("PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256", "image_sha256", {64}),
     ):
-        value = os.environ.get(environment_name)
+        value = compatibility_value(os.environ, canonical_name, legacy_name)
         if value is None:
             continue
+        if not isinstance(value, str):
+            raise TypeError(f"{canonical_name} must be a string")
         if len(value) not in lengths or any(character not in _LOWER_HEX for character in value):
-            raise ValueError(f"{environment_name} must be a lowercase hexadecimal producer digest")
+            raise ValueError(f"{canonical_name} must be a lowercase hexadecimal producer digest")
         result[evidence_name] = value
     return result
 

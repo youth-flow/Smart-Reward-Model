@@ -1,4 +1,4 @@
-"""Reproducibility metadata for Smart Reward Model experiments.
+"""Reproducibility metadata for ProRM/ProRM+ experiments.
 
 The manifest collector is intentionally offline and uses an explicit Slurm
 environment allowlist.  It never serializes the process environment wholesale,
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import config_hash, validate_config
+from .contracts import compatibility_value
 from .seeding import SeedBundle
 
 RUN_MANIFEST_SCHEMA_VERSION = "smart-reward-run/v1"
@@ -50,6 +51,9 @@ _SLURM_ENVIRONMENT_KEYS = (
     "CUDA_VISIBLE_DEVICES",
     "NVIDIA_VISIBLE_DEVICES",
     "GPU_DEVICE_ORDINAL",
+    "PRORM_IMAGE",
+    "PRORM_IMAGE_SHA256",
+    "PRORM_GIT_COMMIT",
     "SRM_IMAGE",
     "SRM_IMAGE_SHA256",
     "SRM_GIT_COMMIT",
@@ -208,8 +212,8 @@ def collect_execution_identity(
     gpu_names = (
         [gpu.get("name") for gpu in gpus if isinstance(gpu, dict)] if isinstance(gpus, list) else []
     )
-    commit = source.get("SRM_GIT_COMMIT")
-    image = source.get("SRM_IMAGE_SHA256")
+    commit = compatibility_value(source, "PRORM_GIT_COMMIT", "SRM_GIT_COMMIT")
+    image = compatibility_value(source, "PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256")
     account = source.get("SLURM_JOB_ACCOUNT")
     partition = source.get("SLURM_JOB_PARTITION")
     complete = (

@@ -54,7 +54,7 @@ def damped_fisher_matvec(
     """Apply ``S.T @ S / n + damping * I`` without forming the matrix.
 
     The normalization matches the empirical Fisher convention
-    ``F_hat = S.T S / n`` used throughout the SRM+ objective.
+    ``F_hat = S.T S / n`` used throughout the ProRM+ objective.
     """
 
     num_samples, num_parameters = _validate_score_matrix(score_matrix)

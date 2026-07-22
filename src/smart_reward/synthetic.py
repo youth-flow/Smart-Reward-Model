@@ -1,7 +1,7 @@
-"""Fast deterministic end-to-end benchmark for misspecified SRM+ training.
+"""Fast deterministic end-to-end benchmark for misspecified ProRM+ training.
 
 This module is a CPU-only numerical integration benchmark, not evidence that
-SRM+ must outperform BT-MLE.  It deliberately runs the real randomized
+ProRM+ must outperform BT-MLE.  It deliberately runs the real randomized
 geometric repeated-label estimator, both production feature trainers, and the
 held-out prompt-covariance policy metrics.  Train labels and test nodes are
 generated from independent local random streams so changing the test split
@@ -23,10 +23,10 @@ from .training import (
     BTMLETrainingConfig,
     FeatureTrainingBatch,
     FrozenFeatureLinearReward,
-    SRMPlusTrainer,
-    SRMPlusTrainingConfig,
+    ProRMPlusTrainer,
+    ProRMPlusTrainingConfig,
     evaluate_bt_mle,
-    evaluate_srm_plus,
+    evaluate_prorm_plus,
 )
 
 _MAX_SEED = 2**63 - 1
@@ -56,9 +56,9 @@ class SyntheticExperimentConfig:
     policy_dimension: int = 3
     annotation_gamma: float = 0.8
     bt_steps: int = 24
-    srm_steps: int = 24
+    prorm_plus_steps: int = 24
     bt_learning_rate: float = 0.04
-    srm_learning_rate: float = 0.04
+    prorm_plus_learning_rate: float = 0.04
     beta: float = 1.0
     training_damping: float = 0.15
     evaluation_damping: float = 0.15
@@ -73,7 +73,7 @@ class SyntheticExperimentConfig:
             "reward_dimension",
             "policy_dimension",
             "bt_steps",
-            "srm_steps",
+            "prorm_plus_steps",
             "microbatch_size",
             "pcg_max_iterations",
         ):
@@ -94,13 +94,25 @@ class SyntheticExperimentConfig:
             raise ValueError("annotation_gamma must be finite and lie in (0, 1)")
         for name in (
             "bt_learning_rate",
-            "srm_learning_rate",
+            "prorm_plus_learning_rate",
             "beta",
             "training_damping",
             "evaluation_damping",
             "pcg_tolerance",
         ):
             _finite_positive(name, getattr(self, name))
+
+    @property
+    def srm_steps(self) -> int:
+        """Compatibility view of :attr:`prorm_plus_steps`."""
+
+        return self.prorm_plus_steps
+
+    @property
+    def srm_learning_rate(self) -> float:
+        """Compatibility view of :attr:`prorm_plus_learning_rate`."""
+
+        return self.prorm_plus_learning_rate
 
 
 @dataclass(frozen=True)
@@ -211,8 +223,8 @@ class SyntheticExperimentResult:
     oracle_scale: float
     train_misspecification_rmse: float
     bt: SyntheticLearnerResult
-    srm: SyntheticLearnerResult
-    srm_pcg: SyntheticPCGEvidence
+    prorm_plus: SyntheticLearnerResult
+    prorm_plus_pcg: SyntheticPCGEvidence
 
     def __post_init__(self) -> None:
         if isinstance(self.seed, bool) or not isinstance(self.seed, int):
@@ -265,16 +277,28 @@ class SyntheticExperimentResult:
         if not all(math.isfinite(value) for value in self.h_values):
             raise ValueError("h_values must be finite")
         if not isinstance(self.bt, SyntheticLearnerResult) or not isinstance(
-            self.srm, SyntheticLearnerResult
+            self.prorm_plus, SyntheticLearnerResult
         ):
-            raise TypeError("bt and srm must be SyntheticLearnerResult objects")
-        if not isinstance(self.srm_pcg, SyntheticPCGEvidence):
-            raise TypeError("srm_pcg must be SyntheticPCGEvidence")
+            raise TypeError("bt and prorm_plus must be SyntheticLearnerResult objects")
+        if not isinstance(self.prorm_plus_pcg, SyntheticPCGEvidence):
+            raise TypeError("prorm_plus_pcg must be SyntheticPCGEvidence")
         if (
             len(self.bt.final_weight) != self.config.reward_dimension
-            or len(self.srm.final_weight) != self.config.reward_dimension
+            or len(self.prorm_plus.final_weight) != self.config.reward_dimension
         ):
             raise ValueError("learner weight dimensions do not match the configuration")
+
+    @property
+    def srm(self) -> SyntheticLearnerResult:
+        """Compatibility view of the canonical ProRM+ result."""
+
+        return self.prorm_plus
+
+    @property
+    def srm_pcg(self) -> SyntheticPCGEvidence:
+        """Compatibility view of the canonical ProRM+ PCG evidence."""
+
+        return self.prorm_plus_pcg
 
 
 @dataclass(frozen=True)
@@ -418,7 +442,7 @@ def run_synthetic_experiment(
 
     The benchmark uses one canonical edge (candidate 0 minus candidate 1) per
     training prompt, while all candidates enter the train Fisher and held-out
-    prompt-covariance metrics.  No assertion or data construction forces SRM+
+    prompt-covariance metrics.  No assertion or data construction forces ProRM+
     to win; the returned values are the observed outcome for ``seed``.
     """
 
@@ -470,7 +494,7 @@ def run_synthetic_experiment(
         effective_config.reward_dimension,
         initial_weight,
     )
-    srm_model = FrozenFeatureLinearReward(
+    prorm_model = FrozenFeatureLinearReward(
         effective_config.reward_dimension,
         initial_weight,
     )
@@ -486,8 +510,8 @@ def run_synthetic_experiment(
     bt_trainer.fit(effective_config.bt_steps)
     bt_final = bt_trainer.evaluate()
 
-    srm_config = SRMPlusTrainingConfig(
-        learning_rate=effective_config.srm_learning_rate,
+    prorm_config = ProRMPlusTrainingConfig(
+        learning_rate=effective_config.prorm_plus_learning_rate,
         optimizer="adamw",
         weight_decay=0.0,
         microbatch_size=effective_config.microbatch_size,
@@ -497,21 +521,21 @@ def run_synthetic_experiment(
         pcg_tolerance=effective_config.pcg_tolerance,
         require_pcg_convergence=True,
     )
-    srm_initial = evaluate_srm_plus(srm_model, training_batch, srm_config).dual_loss
-    srm_trainer = SRMPlusTrainer(srm_model, training_batch, srm_config)
-    srm_history = srm_trainer.fit(effective_config.srm_steps)
-    srm_final_evaluation = srm_trainer.evaluate()
-    last_srm_step = srm_history[-1]
-    srm_diagnostics = (
-        last_srm_step.pcg_iterations,
-        last_srm_step.pcg_residual_norm,
-        last_srm_step.pcg_relative_residual,
-        last_srm_step.pcg_converged,
-        last_srm_step.dual_loss,
-        last_srm_step.dual_saddle_value,
+    prorm_initial = evaluate_prorm_plus(prorm_model, training_batch, prorm_config).dual_loss
+    prorm_trainer = ProRMPlusTrainer(prorm_model, training_batch, prorm_config)
+    prorm_history = prorm_trainer.fit(effective_config.prorm_plus_steps)
+    prorm_final_evaluation = prorm_trainer.evaluate()
+    last_prorm_step = prorm_history[-1]
+    prorm_diagnostics = (
+        last_prorm_step.pcg_iterations,
+        last_prorm_step.pcg_residual_norm,
+        last_prorm_step.pcg_relative_residual,
+        last_prorm_step.pcg_converged,
+        last_prorm_step.dual_loss,
+        last_prorm_step.dual_saddle_value,
     )
-    if any(value is None for value in srm_diagnostics):
-        raise RuntimeError("SRM+ trainer omitted required PCG/dual diagnostics")
+    if any(value is None for value in prorm_diagnostics):
+        raise RuntimeError("ProRM+ trainer omitted required PCG/dual diagnostics")
 
     train_prompt_ids = tuple(range(effective_config.num_train_prompts))
     test_prompt_ids = tuple(
@@ -542,27 +566,27 @@ def run_synthetic_experiment(
             final_train_objective=bt_final,
             config=effective_config,
         ),
-        srm=_learner_result(
-            srm_model,
+        prorm_plus=_learner_result(
+            prorm_model,
             test_nodes,
             test_rewards,
-            initial_train_objective=srm_initial,
-            final_train_objective=srm_final_evaluation.dual_loss,
+            initial_train_objective=prorm_initial,
+            final_train_objective=prorm_final_evaluation.dual_loss,
             config=effective_config,
         ),
-        srm_pcg=SyntheticPCGEvidence(
-            last_train_iterations=last_srm_step.pcg_iterations,
-            last_train_residual_norm=last_srm_step.pcg_residual_norm,
-            last_train_relative_residual=last_srm_step.pcg_relative_residual,
-            last_train_converged=last_srm_step.pcg_converged,
-            last_train_dual_loss=last_srm_step.dual_loss,
-            last_train_dual_saddle_value=last_srm_step.dual_saddle_value,
-            evaluation_iterations=srm_final_evaluation.pcg_iterations,
-            evaluation_residual_norm=srm_final_evaluation.pcg_residual_norm,
-            evaluation_relative_residual=srm_final_evaluation.pcg_relative_residual,
-            evaluation_converged=srm_final_evaluation.pcg_converged,
-            evaluation_dual_loss=srm_final_evaluation.dual_loss,
-            evaluation_dual_saddle_value=srm_final_evaluation.dual_saddle_value,
+        prorm_plus_pcg=SyntheticPCGEvidence(
+            last_train_iterations=last_prorm_step.pcg_iterations,
+            last_train_residual_norm=last_prorm_step.pcg_residual_norm,
+            last_train_relative_residual=last_prorm_step.pcg_relative_residual,
+            last_train_converged=last_prorm_step.pcg_converged,
+            last_train_dual_loss=last_prorm_step.dual_loss,
+            last_train_dual_saddle_value=last_prorm_step.dual_saddle_value,
+            evaluation_iterations=prorm_final_evaluation.pcg_iterations,
+            evaluation_residual_norm=prorm_final_evaluation.pcg_residual_norm,
+            evaluation_relative_residual=prorm_final_evaluation.pcg_relative_residual,
+            evaluation_converged=prorm_final_evaluation.pcg_converged,
+            evaluation_dual_loss=prorm_final_evaluation.dual_loss,
+            evaluation_dual_saddle_value=prorm_final_evaluation.dual_saddle_value,
         ),
     )
 

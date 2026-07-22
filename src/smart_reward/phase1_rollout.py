@@ -6,7 +6,7 @@ never reads an oracle value from the training split.  Instead, it
 
 * reconstructs both policy directions from train-only features and scores;
 * reloads the exact pinned, FP32, fixed-A/zero-B policy coordinate system;
-* matches BT-MLE and SRM+ independently to the same measured forward-KL
+* matches BT-MLE and ProRM+ independently to the same measured forward-KL
   budget on a small shared set of saved reference candidates;
 * samples test responses with per-prompt common random numbers; and
 * releases the policy before loading the oracle once and applying the frozen
@@ -38,6 +38,14 @@ from . import hf as _hf
 from . import phase1 as _phase1
 from .artifacts import load_controlled_feature_artifact
 from .config import config_hash, validate_config
+from .contracts import (
+    CANONICAL_LEARNERS,
+    CONTROLLED_COMPARISON_SCHEMA_V1,
+    CONTROLLED_COMPARISON_SCHEMA_V2,
+    LEGACY_V1_LEARNERS,
+    MATCHED_KL_ROLLOUT_SCHEMA_V2,
+    UPDATED_ROLLOUT_SCHEMA_V2,
+)
 from .data import CandidateNode, load_jsonl
 from .experiment import ControlledFeatureExperiment
 from .hf import ExactTokenCandidates, FixedALoRASetup
@@ -52,11 +60,14 @@ from .rollout import (
 from .scores import ParameterLayout
 from .seeding import SeedBundle, derive_seed
 
-_COMPARISON_SCHEMA = "controlled-comparison/v1"
-_RESULT_SCHEMA = "matched-kl-rollout/v1"
-_ROLLOUT_SCHEMA = "updated-rollout/v1"
+_COMPARISON_SCHEMAS = {
+    CONTROLLED_COMPARISON_SCHEMA_V1,
+    CONTROLLED_COMPARISON_SCHEMA_V2,
+}
+_RESULT_SCHEMA = MATCHED_KL_ROLLOUT_SCHEMA_V2
+_ROLLOUT_SCHEMA = UPDATED_ROLLOUT_SCHEMA_V2
 _ARTIFACT_EVIDENCE_SCHEMA = "phase1-materialization/v1"
-_LEARNERS = ("bt_mle", "srm_plus")
+_LEARNERS = CANONICAL_LEARNERS
 _ROLLOUT_POLICIES = ("reference", *_LEARNERS)
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _MAX_JSON_BYTES = 64 * 1024 * 1024
@@ -186,7 +197,7 @@ def parse_comparison_heads(
     expected_artifact_metadata_sha256: str,
     expected_dimension: int | None = None,
 ) -> dict[str, tuple[float, ...]]:
-    """Parse the unique multiplier-one BT/SRM heads from comparison/v1.
+    """Parse canonical multiplier-one BT/ProRM+ heads from comparison v1/v2.
 
     The comparison identity, learner names, finite float32 head bytes, and
     recorded head digests are all checked.  Sensitivity runs cannot
@@ -220,12 +231,18 @@ def parse_comparison_heads(
     }
     if set(value) != required:
         raise ValueError(
-            "comparison fields do not match controlled-comparison/v1: "
+            "comparison fields do not match the controlled-comparison contract: "
             f"missing={sorted(required - set(value))!r}, "
             f"extra={sorted(set(value) - required)!r}"
         )
-    if value["schema_version"] != _COMPARISON_SCHEMA:
-        raise ValueError(f"comparison schema must equal {_COMPARISON_SCHEMA!r}")
+    schema_version = value["schema_version"]
+    if schema_version not in _COMPARISON_SCHEMAS:
+        raise ValueError(f"unsupported comparison schema: {schema_version!r}")
+    serialized_learners = (
+        LEGACY_V1_LEARNERS
+        if schema_version == CONTROLLED_COMPARISON_SCHEMA_V1
+        else CANONICAL_LEARNERS
+    )
     if value["config_hash"] != expected_digest:
         raise ValueError("comparison config hash does not match the validated configuration")
     if value["seed"] != validated_seed:
@@ -264,32 +281,32 @@ def parse_comparison_heads(
         raise ValueError("the multiplier-one comparison result must be an object")
 
     heads: dict[str, tuple[float, ...]] = {}
-    for learner_name in _LEARNERS:
-        learner = result.get(learner_name)
+    for learner_name, serialized_name in zip(_LEARNERS, serialized_learners, strict=True):
+        learner = result.get(serialized_name)
         if not isinstance(learner, Mapping):
-            raise ValueError(f"comparison is missing learner {learner_name!r}")
-        if learner.get("method") != learner_name:
-            raise ValueError(f"comparison learner {learner_name!r} has the wrong method")
+            raise ValueError(f"comparison is missing learner {serialized_name!r}")
+        if learner.get("method") != serialized_name:
+            raise ValueError(f"comparison learner {serialized_name!r} has the wrong method")
         raw_weight = learner.get("head_weight")
         if isinstance(raw_weight, (str, bytes, bytearray)) or not isinstance(raw_weight, Sequence):
-            raise TypeError(f"{learner_name}.head_weight must be a sequence")
+            raise TypeError(f"{serialized_name}.head_weight must be a sequence")
         weight = tuple(
-            _finite_float(item, name=f"{learner_name}.head_weight[{index}]")
+            _finite_float(item, name=f"{serialized_name}.head_weight[{index}]")
             for index, item in enumerate(raw_weight)
         )
         if not weight:
-            raise ValueError(f"{learner_name}.head_weight must not be empty")
+            raise ValueError(f"{serialized_name}.head_weight must not be empty")
         if expected_dimension is not None and len(weight) != expected_dimension:
             raise ValueError(
-                f"{learner_name}.head_weight has length {len(weight)}, "
+                f"{serialized_name}.head_weight has length {len(weight)}, "
                 f"expected {expected_dimension}"
             )
         recorded_sha = _validate_digest(
-            learner.get("head_sha256"), name=f"{learner_name}.head_sha256"
+            learner.get("head_sha256"), name=f"{serialized_name}.head_sha256"
         )
         tensor = torch.tensor(weight, dtype=torch.float32)
         if _head_sha256(tensor) != recorded_sha:
-            raise ValueError(f"{learner_name}.head_weight does not match head_sha256")
+            raise ValueError(f"{serialized_name}.head_weight does not match head_sha256")
         heads[learner_name] = weight
     return heads
 
@@ -642,7 +659,7 @@ def _validate_producer_identity(value: object) -> dict[str, str]:
     formal_producer = _phase1._producer_identity_from_environment()
     if formal_producer and producer != formal_producer:
         raise ValueError(
-            "artifact producer identity does not match SRM_GIT_COMMIT/SRM_IMAGE_SHA256"
+            "artifact producer identity does not match PRORM_GIT_COMMIT/PRORM_IMAGE_SHA256"
         )
     return producer
 
@@ -1146,7 +1163,7 @@ def evaluate_matched_kl_rollouts(
     device: str | torch.device = "cuda",
     local_files_only: bool = True,
 ) -> dict[str, object]:
-    """Run the real matched-KL BT/SRM test-rollout evaluation stage.
+    """Run the real matched-KL BT/ProRM+ test-rollout evaluation stage.
 
     Outputs are ``output_json`` and a sibling ``updated_rollouts.jsonl``.
     Existing targets are refused before optional dependencies, model cache, or

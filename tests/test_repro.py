@@ -134,8 +134,8 @@ def test_execution_identity_requires_sigroup_and_exactly_one_gpu(
         },
     )
     environment = {
-        "SRM_GIT_COMMIT": "a" * 40,
-        "SRM_IMAGE_SHA256": "b" * 64,
+        "PRORM_GIT_COMMIT": "a" * 40,
+        "PRORM_IMAGE_SHA256": "b" * 64,
         "SLURM_JOB_ACCOUNT": "sigroup",
         "SLURM_JOB_PARTITION": "gpu-l20",
     }
@@ -150,6 +150,34 @@ def test_execution_identity_requires_sigroup_and_exactly_one_gpu(
     }
     environment["SLURM_JOB_ACCOUNT"] = "another-account"
     assert collect_execution_identity(environment)["formal"] is False
+
+
+def test_execution_identity_accepts_legacy_keys_but_rejects_conflicts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repro_module,
+        "collect_torch_state",
+        lambda: {
+            "cuda_available": True,
+            "gpu_count": 1,
+            "gpus": [{"name": "NVIDIA L20"}],
+        },
+    )
+    environment = {
+        "SRM_GIT_COMMIT": "a" * 40,
+        "SRM_IMAGE_SHA256": "b" * 64,
+        "SLURM_JOB_ACCOUNT": "sigroup",
+        "SLURM_JOB_PARTITION": "gpu-l20",
+    }
+    assert collect_execution_identity(environment)["formal"] is True
+    environment["PRORM_IMAGE_SHA256"] = "c" * 64
+    with pytest.raises(ValueError, match="conflicting PRORM_IMAGE_SHA256"):
+        collect_execution_identity(environment)
+
+    environment["PRORM_IMAGE_SHA256"] = ""
+    with pytest.raises(ValueError, match="conflicting PRORM_IMAGE_SHA256"):
+        collect_execution_identity(environment)
 
 
 def test_atomic_json_write_replaces_destination_and_leaves_no_temp_files(

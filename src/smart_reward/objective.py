@@ -1,4 +1,4 @@
-"""The empirical Fisher-GMM/SRM+ objective with fixed normalization.
+"""The empirical Fisher-GMM/ProRM+ objective with fixed normalization.
 
 The factor convention in this module is deliberately explicit:
 
@@ -177,8 +177,9 @@ def envelope_surrogate(
     return torch.mean(weights * (margins - targets))
 
 
-# Explicit domain name retained for callers that prefer it.
-srm_dual_loss = dual_loss
+# Canonical domain name plus the pre-ProRM compatibility alias.
+prorm_dual_loss = dual_loss
+srm_dual_loss = prorm_dual_loss
 
 
 __all__ = [
@@ -187,5 +188,6 @@ __all__ = [
     "empirical_moment",
     "envelope_surrogate",
     "envelope_weights",
+    "prorm_dual_loss",
     "srm_dual_loss",
 ]

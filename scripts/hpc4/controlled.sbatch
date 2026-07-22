@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=srm-controlled
+#SBATCH --job-name=prorm-controlled
 #SBATCH --account=sigroup
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -7,27 +7,47 @@
 
 set -euo pipefail
 
-: "${SRM_IMAGE:?absolute validated Apptainer image is required}"
-: "${SRM_IMAGE_SHA256:?validated image SHA256 is required}"
-: "${SRM_CONFIG:?absolute experiment config path is required}"
-: "${SRM_HF_CACHE:?absolute pre-staged Hugging Face cache is required}"
-: "${SRM_REPO_ROOT:?absolute Git repository root is required}"
+resolve_compat_env() {
+  local canonical="$1" legacy="$2" canonical_value="" legacy_value="" resolved=""
+  local canonical_set=0 legacy_set=0
+  if [[ -v "${canonical}" ]]; then canonical_set=1; canonical_value="${!canonical}"; fi
+  if [[ -v "${legacy}" ]]; then legacy_set=1; legacy_value="${!legacy}"; fi
+  if (( canonical_set && legacy_set )) && [[ "${canonical_value}" != "${legacy_value}" ]]; then
+    echo "conflicting ${canonical} and legacy ${legacy}" >&2
+    exit 2
+  fi
+  if (( canonical_set )); then resolved="${canonical_value}"; else resolved="${legacy_value}"; fi
+  printf -v "${canonical}" '%s' "${resolved}"
+  printf -v "${legacy}" '%s' "${resolved}"
+  export "${canonical}" "${legacy}"
+}
 
-for path in "${SRM_IMAGE}" "${SRM_CONFIG}"; do
+resolve_compat_env PRORM_IMAGE SRM_IMAGE
+resolve_compat_env PRORM_IMAGE_SHA256 SRM_IMAGE_SHA256
+resolve_compat_env PRORM_CONFIG SRM_CONFIG
+resolve_compat_env PRORM_HF_CACHE SRM_HF_CACHE
+resolve_compat_env PRORM_REPO_ROOT SRM_REPO_ROOT
+: "${PRORM_IMAGE:?absolute validated Apptainer image is required}"
+: "${PRORM_IMAGE_SHA256:?validated image SHA256 is required}"
+: "${PRORM_CONFIG:?absolute experiment config path is required}"
+: "${PRORM_HF_CACHE:?absolute pre-staged Hugging Face cache is required}"
+: "${PRORM_REPO_ROOT:?absolute Git repository root is required}"
+
+for path in "${PRORM_IMAGE}" "${PRORM_CONFIG}"; do
   [[ "${path}" = /* ]] || { echo "path must be absolute: ${path}" >&2; exit 2; }
   test -f "${path}"
 done
-[[ "${SRM_HF_CACHE}" = /* ]] || { echo "SRM_HF_CACHE must be absolute" >&2; exit 2; }
-test -d "${SRM_HF_CACHE}"
-[[ "${SRM_REPO_ROOT}" = /* ]] || { echo "SRM_REPO_ROOT must be absolute" >&2; exit 2; }
-test -d "${SRM_REPO_ROOT}/.git"
-printf '%s  %s\n' "${SRM_IMAGE_SHA256}" "${SRM_IMAGE}" | sha256sum --check --status
+[[ "${PRORM_HF_CACHE}" = /* ]] || { echo "PRORM_HF_CACHE must be absolute" >&2; exit 2; }
+test -d "${PRORM_HF_CACHE}"
+[[ "${PRORM_REPO_ROOT}" = /* ]] || { echo "PRORM_REPO_ROOT must be absolute" >&2; exit 2; }
+test -d "${PRORM_REPO_ROOT}/.git"
+printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" | sha256sum --check --status
 
-repo_root="${SRM_REPO_ROOT}"
-config_path="$(realpath "${SRM_CONFIG}")"
+repo_root="${PRORM_REPO_ROOT}"
+config_path="$(realpath "${PRORM_CONFIG}")"
 case "${config_path}" in
   "${repo_root}"/*) ;;
-  *) echo "formal configs must be tracked files inside SRM_REPO_ROOT" >&2; exit 2 ;;
+  *) echo "formal configs must be tracked files inside PRORM_REPO_ROOT" >&2; exit 2 ;;
 esac
 git_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
 if [[ -n "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]]; then
@@ -43,11 +63,11 @@ mkdir -p "${job_dir}" "${project_base}/runs" "${project_base}/artifacts"
 
 container=(
   apptainer exec --cleanenv --nv
-  --bind "${repo_root}:${repo_root},${job_dir}:${job_dir},${SRM_HF_CACHE}:${SRM_HF_CACHE}"
+  --bind "${repo_root}:${repo_root},${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}"
   --env "PYTHONPATH=${repo_root}/src"
-  --env "HF_HOME=${SRM_HF_CACHE}"
-  --env "HF_HUB_CACHE=${SRM_HF_CACHE}/hub"
-  --env "HF_DATASETS_CACHE=${SRM_HF_CACHE}/datasets"
+  --env "HF_HOME=${PRORM_HF_CACHE}"
+  --env "HF_HUB_CACHE=${PRORM_HF_CACHE}/hub"
+  --env "HF_DATASETS_CACHE=${PRORM_HF_CACHE}/datasets"
   --env "TRANSFORMERS_OFFLINE=1"
   --env "HF_DATASETS_OFFLINE=1"
 )
@@ -65,14 +85,17 @@ for variable in \
   fi
 done
 container+=(
+  --env "PRORM_IMAGE=${PRORM_IMAGE}"
+  --env "PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256}"
+  --env "PRORM_GIT_COMMIT=${git_commit}"
   --env "SRM_IMAGE=${SRM_IMAGE}"
   --env "SRM_IMAGE_SHA256=${SRM_IMAGE_SHA256}"
   --env "SRM_GIT_COMMIT=${git_commit}"
-  "${SRM_IMAGE}"
+  "${PRORM_IMAGE}"
 )
 
 mapfile -t run_info < <(
-  "${container[@]}" python - "${SRM_CONFIG}" "${SLURM_ARRAY_TASK_ID:-0}" <<'PY'
+  "${container[@]}" python - "${PRORM_CONFIG}" "${SLURM_ARRAY_TASK_ID:-0}" <<'PY'
 import sys
 from smart_reward.config import config_hash, load_config
 
@@ -93,7 +116,7 @@ seed="${run_info[1]}"
 config_sha="${run_info[2]}"
 
 artifact_dir="${job_dir}/artifact"
-project_artifact="${project_base}/artifacts/${config_sha}/${SRM_IMAGE_SHA256}/${git_commit}/seed-${seed}"
+project_artifact="${project_base}/artifacts/${config_sha}/${PRORM_IMAGE_SHA256}/${git_commit}/seed-${seed}"
 project_run="${project_base}/runs/${run_name}/${config_sha}/seed-${seed}/job-${SLURM_JOB_ID}"
 mkdir -p "${project_run}"
 
@@ -119,29 +142,35 @@ print("formal_gpu", torch.cuda.get_device_name(0))
 PY
 
 "${container[@]}" python -m smart_reward.cli env-report \
-  "${SRM_CONFIG}" --seed "${seed}" --repo-root "${repo_root}" \
+  "${PRORM_CONFIG}" --seed "${seed}" --repo-root "${repo_root}" \
   --output "${job_dir}/run-manifest.json"
 
 if [[ -f "${project_artifact}/metadata.json" ]]; then
   cp -a "${project_artifact}" "${artifact_dir}"
 else
-  "${container[@]}" env "SRM_MEMORY_REPORT=${job_dir}/memory-materialize.json" \
+  "${container[@]}" env \
+    "PRORM_MEMORY_REPORT=${job_dir}/memory-materialize.json" \
+    "SRM_MEMORY_REPORT=${job_dir}/memory-materialize.json" \
     python -m smart_reward.cli controlled-materialize \
-    "${SRM_CONFIG}" "${artifact_dir}" --seed "${seed}" --device cuda
+    "${PRORM_CONFIG}" "${artifact_dir}" --seed "${seed}" --device cuda
   mkdir -p "$(dirname "${project_artifact}")"
   artifact_staging="${project_artifact}.tmp-${SLURM_JOB_ID}"
   cp -a "${artifact_dir}" "${artifact_staging}"
   mv "${artifact_staging}" "${project_artifact}"
 fi
 
-"${container[@]}" env "SRM_MEMORY_REPORT=${job_dir}/memory-compare.json" \
+"${container[@]}" env \
+  "PRORM_MEMORY_REPORT=${job_dir}/memory-compare.json" \
+  "SRM_MEMORY_REPORT=${job_dir}/memory-compare.json" \
   python -m smart_reward.cli controlled-compare \
-  "${SRM_CONFIG}" "${artifact_dir}" "${job_dir}/comparison.json" \
+  "${PRORM_CONFIG}" "${artifact_dir}" "${job_dir}/comparison.json" \
   --seed "${seed}" --device cuda --run-manifest "${job_dir}/run-manifest.json"
 
-"${container[@]}" env "SRM_MEMORY_REPORT=${job_dir}/memory-rollout.json" \
+"${container[@]}" env \
+  "PRORM_MEMORY_REPORT=${job_dir}/memory-rollout.json" \
+  "SRM_MEMORY_REPORT=${job_dir}/memory-rollout.json" \
   python -m smart_reward.cli controlled-rollout \
-  "${SRM_CONFIG}" "${artifact_dir}" "${job_dir}/comparison.json" \
+  "${PRORM_CONFIG}" "${artifact_dir}" "${job_dir}/comparison.json" \
   "${job_dir}/rollout.json" --seed "${seed}" --device cuda
 
 echo "controlled run complete: ${project_run}"

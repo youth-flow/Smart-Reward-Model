@@ -16,7 +16,7 @@ def repeated_btl_nll(
     For edge ``i`` with margin ``t_i``, ``S_i`` left wins and ``N_i`` total
     labels, the summed loss is ``N_i * softplus(t_i) - S_i * t_i``.  This is
     exactly equivalent to expanding every repeated Bernoulli label.  In
-    contrast to SRM+, the baseline intentionally weights an edge by ``N_i``.
+    contrast to ProRM+, the baseline intentionally weights an edge by ``N_i``.
     """
 
     if not all(isinstance(value, torch.Tensor) for value in (margins, left_wins, num_annotations)):

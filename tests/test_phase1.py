@@ -326,13 +326,13 @@ def test_producer_identity_reads_only_validated_digest_fields(
     from smart_reward.phase1 import _producer_identity_from_environment
 
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-appear")
-    monkeypatch.setenv("SRM_GIT_COMMIT", "a" * 40)
-    monkeypatch.setenv("SRM_IMAGE_SHA256", "b" * 64)
+    monkeypatch.setenv("PRORM_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("PRORM_IMAGE_SHA256", "b" * 64)
     assert _producer_identity_from_environment() == {
         "git_commit": "a" * 40,
         "image_sha256": "b" * 64,
     }
 
-    monkeypatch.setenv("SRM_IMAGE_SHA256", "not-a-digest")
+    monkeypatch.setenv("PRORM_IMAGE_SHA256", "not-a-digest")
     with pytest.raises(ValueError, match="producer digest"):
         _producer_identity_from_environment()

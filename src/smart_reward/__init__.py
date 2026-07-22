@@ -1,4 +1,4 @@
-"""Numerical core for Smart Reward Model (SRM+) experiments."""
+"""Numerical core for Prospective Reward Modeling (ProRM+) experiments."""
 
 from .annotations import (
     RepeatedLabelBatch,
@@ -55,6 +55,7 @@ from .objective import (
     empirical_moment,
     envelope_surrogate,
     envelope_weights,
+    prorm_dual_loss,
     srm_dual_loss,
 )
 from .oracle import (
@@ -95,7 +96,16 @@ from .training import (
     BTMLETrainer,
     FeatureTrainingBatch,
     FrozenFeatureLinearReward,
+    ProRMPlusEvaluation,
+    ProRMPlusTrainer,
+    ProRMPlusTrainingConfig,
+    SRMEvaluation,
     SRMPlusTrainer,
+    SRMPlusTrainingConfig,
+    evaluate_prorm_plus,
+    evaluate_srm_plus,
+    train_prorm_plus,
+    train_srm_plus,
 )
 
 __all__ = [
@@ -114,11 +124,16 @@ __all__ = [
     "ParameterLayoutEntry",
     "PCGBreakdownError",
     "PCGResult",
+    "ProRMPlusEvaluation",
+    "ProRMPlusTrainer",
+    "ProRMPlusTrainingConfig",
     "RepeatedLabelBatch",
     "RobustOracleTransform",
     "SchemaError",
     "ScoreDiagnostics",
+    "SRMEvaluation",
     "SRMPlusTrainer",
+    "SRMPlusTrainingConfig",
     "TrainingTensorData",
     "TrainingEdgeRecord",
     "btl_probabilities",
@@ -156,6 +171,7 @@ __all__ = [
     "per_sample_scores",
     "policy_reward_moment",
     "policy_direction_from_head",
+    "prorm_dual_loss",
     "oracle_rollout_improvement",
     "randomized_truncation_u_statistic_from_counts",
     "repeated_labels_to_h",
@@ -176,5 +192,9 @@ __all__ = [
     "assemble_controlled_experiment",
     "run_feature_experiment",
     "run_synthetic_experiment",
+    "evaluate_prorm_plus",
+    "evaluate_srm_plus",
+    "train_prorm_plus",
+    "train_srm_plus",
     "validate_config",
 ]

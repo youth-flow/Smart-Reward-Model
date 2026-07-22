@@ -1,12 +1,12 @@
-"""Deterministic paired-seed aggregation for SRM+/BT experiments.
+"""Deterministic paired-seed aggregation for ProRM+/BT experiments.
 
-Every reported effect is defined as ``SRM - BT`` on the *same* seed.  Metric
+Every reported effect is defined as ``ProRM+ - BT`` on the *same* seed.  Metric
 direction is metadata, not a hypothesis test:
 
 * local regret and error metrics are lower-is-better, so a negative paired
-  difference favors SRM;
+  difference favors ProRM+;
 * cosine and improvement metrics are higher-is-better, so a positive paired
-  difference favors SRM.
+  difference favors ProRM+.
 
 The module intentionally reports no p-value and no ``significant`` boolean.
 Its percentile interval is descriptive uncertainty over paired seeds.  All
@@ -30,7 +30,9 @@ from pathlib import Path
 
 import torch
 
-PAIRED_AGGREGATE_SCHEMA_VERSION = "paired-seed-aggregate/v1"
+from .contracts import PAIRED_AGGREGATE_SCHEMA_V2
+
+PAIRED_AGGREGATE_SCHEMA_VERSION = PAIRED_AGGREGATE_SCHEMA_V2
 DEFAULT_CONFIDENCE_LEVEL = 0.95
 DEFAULT_BOOTSTRAP_RESAMPLES = 10_000
 _MAX_TORCH_SEED = 2**63 - 1
@@ -43,12 +45,18 @@ class MetricDirection(str, Enum):
     HIGHER_IS_BETTER = "higher_is_better"
 
     @property
-    def favorable_srm_minus_bt_sign(self) -> str:
-        """Return the SRM-minus-BT sign that favors SRM, without inference."""
+    def favorable_prorm_plus_minus_bt_sign(self) -> str:
+        """Return the ProRM+-minus-BT sign that favors ProRM+, without inference."""
 
         if self is MetricDirection.LOWER_IS_BETTER:
             return "negative"
         return "positive"
+
+    @property
+    def favorable_srm_minus_bt_sign(self) -> str:
+        """Compatibility alias for the canonical ProRM+ sign property."""
+
+        return self.favorable_prorm_plus_minus_bt_sign
 
 
 def infer_metric_direction(metric: str) -> MetricDirection:
@@ -102,31 +110,43 @@ class PercentileConfidenceInterval:
 
 @dataclass(frozen=True, slots=True)
 class PerSeedPairedMetric:
-    """One auditable BT/SRM pair and its oriented numerical difference."""
+    """One auditable BT/ProRM+ pair and its oriented numerical difference."""
 
     seed: int
     bt: float
-    srm: float
-    srm_minus_bt: float
+    prorm_plus: float
+    prorm_plus_minus_bt: float
 
     def __post_init__(self) -> None:
         _validate_seed(self.seed, name="seed")
         bt = _finite_float(self.bt, "bt")
-        srm = _finite_float(self.srm, "srm")
-        difference = _finite_float(self.srm_minus_bt, "srm_minus_bt")
-        expected = srm - bt
+        prorm_plus = _finite_float(self.prorm_plus, "prorm_plus")
+        difference = _finite_float(self.prorm_plus_minus_bt, "prorm_plus_minus_bt")
+        expected = prorm_plus - bt
         if difference != expected:
-            raise ValueError("srm_minus_bt must equal srm - bt exactly")
+            raise ValueError("prorm_plus_minus_bt must equal prorm_plus - bt exactly")
         object.__setattr__(self, "bt", bt)
-        object.__setattr__(self, "srm", srm)
-        object.__setattr__(self, "srm_minus_bt", difference)
+        object.__setattr__(self, "prorm_plus", prorm_plus)
+        object.__setattr__(self, "prorm_plus_minus_bt", difference)
+
+    @property
+    def srm(self) -> float:
+        """Compatibility view of :attr:`prorm_plus`."""
+
+        return self.prorm_plus
+
+    @property
+    def srm_minus_bt(self) -> float:
+        """Compatibility view of :attr:`prorm_plus_minus_bt`."""
+
+        return self.prorm_plus_minus_bt
 
     def to_dict(self) -> dict[str, object]:
         return {
             "seed": self.seed,
             "bt": self.bt,
-            "srm": self.srm,
-            "srm_minus_bt": self.srm_minus_bt,
+            "prorm_plus": self.prorm_plus,
+            "prorm_plus_minus_bt": self.prorm_plus_minus_bt,
         }
 
 
@@ -163,16 +183,22 @@ class PairedMetricSummary:
             raise TypeError("bootstrap_ci must be a PercentileConfidenceInterval")
 
     @property
-    def favorable_srm_minus_bt_sign(self) -> str:
-        """Document which sign favors SRM; this is not a significance claim."""
+    def favorable_prorm_plus_minus_bt_sign(self) -> str:
+        """Document which sign favors ProRM+; this is not a significance claim."""
 
-        return self.direction.favorable_srm_minus_bt_sign
+        return self.direction.favorable_prorm_plus_minus_bt_sign
+
+    @property
+    def favorable_srm_minus_bt_sign(self) -> str:
+        """Compatibility alias for the canonical ProRM+ sign property."""
+
+        return self.favorable_prorm_plus_minus_bt_sign
 
     def to_dict(self) -> dict[str, object]:
         return {
             "metric": self.metric,
             "direction": self.direction.value,
-            "favorable_srm_minus_bt_sign": self.favorable_srm_minus_bt_sign,
+            "favorable_prorm_plus_minus_bt_sign": (self.favorable_prorm_plus_minus_bt_sign),
             "num_seeds": len(self.per_seed),
             "per_seed": [item.to_dict() for item in self.per_seed],
             "paired_mean": self.paired_mean,
@@ -295,7 +321,7 @@ def paired_bootstrap_ci(
     num_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
     confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
 ) -> PercentileConfidenceInterval:
-    """Bootstrap the mean of already paired ``SRM - BT`` differences."""
+    """Bootstrap the mean of already paired ``ProRM+ - BT`` differences."""
 
     if isinstance(paired_differences, (str, bytes)) or not isinstance(paired_differences, Sequence):
         raise TypeError("paired_differences must be a sequence of real scalars")
@@ -357,33 +383,36 @@ def _resolve_direction(
 
 def _validate_result_tables(
     bt_by_seed: Mapping[int, Mapping[str, Real]],
-    srm_by_seed: Mapping[int, Mapping[str, Real]],
+    prorm_plus_by_seed: Mapping[int, Mapping[str, Real]],
 ) -> tuple[
     tuple[int, ...],
     tuple[str, ...],
     dict[int, dict[str, float]],
     dict[int, dict[str, float]],
 ]:
-    for name, value in (("bt_by_seed", bt_by_seed), ("srm_by_seed", srm_by_seed)):
+    for name, value in (
+        ("bt_by_seed", bt_by_seed),
+        ("prorm_plus_by_seed", prorm_plus_by_seed),
+    ):
         if not isinstance(value, Mapping):
             raise TypeError(f"{name} must map seeds to metric mappings")
     bt_seeds = set(bt_by_seed)
-    srm_seeds = set(srm_by_seed)
-    for seed in bt_seeds | srm_seeds:
+    prorm_plus_seeds = set(prorm_plus_by_seed)
+    for seed in bt_seeds | prorm_plus_seeds:
         _validate_seed(seed, name="seed")
-    if bt_seeds != srm_seeds:
+    if bt_seeds != prorm_plus_seeds:
         raise ValueError(
-            "BT and SRM seed sets must match exactly; "
-            f"BT-only={sorted(bt_seeds - srm_seeds)!r}, "
-            f"SRM-only={sorted(srm_seeds - bt_seeds)!r}"
+            "BT and ProRM+ seed sets must match exactly; "
+            f"BT-only={sorted(bt_seeds - prorm_plus_seeds)!r}, "
+            f"ProRM+-only={sorted(prorm_plus_seeds - bt_seeds)!r}"
         )
     if len(bt_seeds) < 2:
         raise ValueError("paired aggregation requires at least two shared seeds")
     seeds = tuple(sorted(bt_seeds))
 
-    normalized: dict[str, dict[int, dict[str, float]]] = {"bt": {}, "srm": {}}
+    normalized: dict[str, dict[int, dict[str, float]]] = {"bt": {}, "prorm_plus": {}}
     expected_metrics: set[str] | None = None
-    for learner, table in (("bt", bt_by_seed), ("srm", srm_by_seed)):
+    for learner, table in (("bt", bt_by_seed), ("prorm_plus", prorm_plus_by_seed)):
         for seed in seeds:
             row = table[seed]
             if not isinstance(row, Mapping):
@@ -396,7 +425,9 @@ def _validate_result_tables(
             if expected_metrics is None:
                 expected_metrics = metric_names
             elif metric_names != expected_metrics:
-                raise ValueError("every BT/SRM seed row must contain exactly the same metric names")
+                raise ValueError(
+                    "every BT/ProRM+ seed row must contain exactly the same metric names"
+                )
             normalized[learner][seed] = {
                 metric: _finite_float(value, f"{learner}[{seed}][{metric!r}]")
                 for metric, value in row.items()
@@ -406,13 +437,13 @@ def _validate_result_tables(
         seeds,
         tuple(sorted(expected_metrics)),
         normalized["bt"],
-        normalized["srm"],
+        normalized["prorm_plus"],
     )
 
 
 def aggregate_paired_metrics(
     bt_by_seed: Mapping[int, Mapping[str, Real]],
-    srm_by_seed: Mapping[int, Mapping[str, Real]],
+    prorm_plus_by_seed: Mapping[int, Mapping[str, Real]],
     *,
     directions: Mapping[str, MetricDirection | str] | None = None,
     bootstrap_seed: int | None = None,
@@ -420,14 +451,14 @@ def aggregate_paired_metrics(
     num_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
     confidence_level: float = DEFAULT_CONFIDENCE_LEVEL,
 ) -> PairedMetricsAggregate:
-    """Aggregate same-name BT/SRM scalar metrics over exactly paired seeds.
+    """Aggregate same-name BT/ProRM+ scalar metrics over exactly paired seeds.
 
     The returned paired mean, sample standard deviation, standard error, and
-    percentile interval are all computed from per-seed ``SRM - BT`` values.
+    percentile interval are all computed from per-seed ``ProRM+ - BT`` values.
     No result is labelled statistically significant.
     """
 
-    seeds, metric_names, bt, srm = _validate_result_tables(bt_by_seed, srm_by_seed)
+    seeds, metric_names, bt, prorm_plus = _validate_result_tables(bt_by_seed, prorm_plus_by_seed)
     resamples = _positive_integer(num_resamples, "num_resamples")
     confidence = _confidence_level(confidence_level)
     if directions is not None:
@@ -450,13 +481,13 @@ def aggregate_paired_metrics(
             PerSeedPairedMetric(
                 seed=seed,
                 bt=bt[seed][metric],
-                srm=srm[seed][metric],
-                srm_minus_bt=srm[seed][metric] - bt[seed][metric],
+                prorm_plus=prorm_plus[seed][metric],
+                prorm_plus_minus_bt=prorm_plus[seed][metric] - bt[seed][metric],
             )
             for seed in seeds
         )
         differences = torch.tensor(
-            [item.srm_minus_bt for item in per_seed],
+            [item.prorm_plus_minus_bt for item in per_seed],
             dtype=torch.float64,
         )
         sample_std = float(torch.std(differences, correction=1).item())

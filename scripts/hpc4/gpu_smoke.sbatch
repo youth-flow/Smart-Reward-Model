@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=srm-gpu-smoke
+#SBATCH --job-name=prorm-gpu-smoke
 #SBATCH --account=sigroup
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -8,15 +8,33 @@
 
 set -euo pipefail
 
-: "${SRM_IMAGE:?set SRM_IMAGE to the absolute path of the validated Apptainer image}"
-: "${SRM_IMAGE_SHA256:?set SRM_IMAGE_SHA256 to the expected lowercase SHA256}"
-: "${SRM_REPO_ROOT:?set SRM_REPO_ROOT to the absolute repository root}"
-[[ "${SRM_REPO_ROOT}" = /* ]] || { echo "SRM_REPO_ROOT must be absolute" >&2; exit 2; }
-test -d "${SRM_REPO_ROOT}/.git"
-test -f "${SRM_IMAGE}"
-printf '%s  %s\n' "${SRM_IMAGE_SHA256}" "${SRM_IMAGE}" | sha256sum --check --status
+resolve_compat_env() {
+  local canonical="$1" legacy="$2" canonical_value="" legacy_value="" resolved=""
+  local canonical_set=0 legacy_set=0
+  if [[ -v "${canonical}" ]]; then canonical_set=1; canonical_value="${!canonical}"; fi
+  if [[ -v "${legacy}" ]]; then legacy_set=1; legacy_value="${!legacy}"; fi
+  if (( canonical_set && legacy_set )) && [[ "${canonical_value}" != "${legacy_value}" ]]; then
+    echo "conflicting ${canonical} and legacy ${legacy}" >&2
+    exit 2
+  fi
+  if (( canonical_set )); then resolved="${canonical_value}"; else resolved="${legacy_value}"; fi
+  printf -v "${canonical}" '%s' "${resolved}"
+  printf -v "${legacy}" '%s' "${resolved}"
+  export "${canonical}" "${legacy}"
+}
 
-repo_root="${SRM_REPO_ROOT}"
+resolve_compat_env PRORM_IMAGE SRM_IMAGE
+resolve_compat_env PRORM_IMAGE_SHA256 SRM_IMAGE_SHA256
+resolve_compat_env PRORM_REPO_ROOT SRM_REPO_ROOT
+: "${PRORM_IMAGE:?set PRORM_IMAGE to the absolute path of the validated Apptainer image}"
+: "${PRORM_IMAGE_SHA256:?set PRORM_IMAGE_SHA256 to the expected lowercase SHA256}"
+: "${PRORM_REPO_ROOT:?set PRORM_REPO_ROOT to the absolute repository root}"
+[[ "${PRORM_REPO_ROOT}" = /* ]] || { echo "PRORM_REPO_ROOT must be absolute" >&2; exit 2; }
+test -d "${PRORM_REPO_ROOT}/.git"
+test -f "${PRORM_IMAGE}"
+printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" | sha256sum --check --status
+
+repo_root="${PRORM_REPO_ROOT}"
 
 container_visibility=()
 for variable in CUDA_VISIBLE_DEVICES NVIDIA_VISIBLE_DEVICES GPU_DEVICE_ORDINAL; do
@@ -42,8 +60,8 @@ trap sync_report EXIT
   echo "partition=${SLURM_JOB_PARTITION}"
   echo "submit_dir=${SLURM_SUBMIT_DIR}"
   echo "git_commit=$(git -C "${repo_root}" rev-parse HEAD 2>/dev/null || echo unavailable)"
-  echo "image=${SRM_IMAGE}"
-  echo "image_sha256=${SRM_IMAGE_SHA256}"
+  echo "image=${PRORM_IMAGE}"
+  echo "image_sha256=${PRORM_IMAGE_SHA256}"
   hostname
   nvidia-smi
   env | grep '^SLURM_' | sort
@@ -53,7 +71,7 @@ apptainer exec --cleanenv --nv \
   --bind "${repo_root}:${repo_root}" \
   --env "PYTHONPATH=${repo_root}/src" \
   "${container_visibility[@]}" \
-  "${SRM_IMAGE}" \
+  "${PRORM_IMAGE}" \
   python - <<'PY' | tee -a "${report}"
 import torch
 import transformers
@@ -79,9 +97,9 @@ x = torch.arange(16, device="cuda", dtype=torch.float32)
 print("cuda_sum", x.sum().item())
 PY
 
-apptainer exec --cleanenv "${SRM_IMAGE}" git --version | tee -a "${report}"
+apptainer exec --cleanenv "${PRORM_IMAGE}" git --version | tee -a "${report}"
 
-apptainer exec --cleanenv "${SRM_IMAGE}" python -m pip check | tee -a "${report}"
+apptainer exec --cleanenv "${PRORM_IMAGE}" python -m pip check | tee -a "${report}"
 
-apptainer exec --cleanenv "${SRM_IMAGE}" python -m pip freeze \
+apptainer exec --cleanenv "${PRORM_IMAGE}" python -m pip freeze \
   | sort | tee -a "${report}"

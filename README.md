@@ -1,282 +1,357 @@
-# Smart Reward Model（SRM+）
+# Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret
 
 [![CI](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml)
 
-> 不去拟合所有 reward error；只拟合会改变下一次 policy update 的那一部分。
+Preference likelihood asks whether a reward model explains past labels. **Prospective Reward Modeling
+(ProRM)** instead asks what the downstream policy optimizer will do with that reward model. The method
+therefore trains for the reward error that changes the next policy update, rather than for every pointwise
+reward error.
 
-SRM+ 是一个从**局部 KL-regularized policy regret**直接推导出的 policy-aware reward
-learning 目标。标准 Bradley–Terry（BT）训练优化 preference prediction；SRM+ 优化
-reward error 经 reference-policy Fisher 几何传递后造成的局部决策误差。两者在受限、
-可能 misspecified 的 reward class 中一般不是同一个目标。
+The paper title is fixed as:
 
-`SRM+` 是本仓库的方法名；当前正式 baseline 是 repeated-label BT-MLE，并不存在一个单独
-实现、名为 `SRM` 的中间 baseline，因此“+”不应被解读为已完成的消融层级。
+> **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
 
-## 当前状态
+This repository implements **ProRM+**, the observable repeated-label Fisher–GMM realization of the ideal
+ProRM objective. Its formal comparison is repeated-label Bradley–Terry maximum likelihood (BT-MLE).
 
-| 项目 | 状态 |
+## Name and claim contract
+
+The two names refer to different mathematical levels:
+
+| Name | Meaning | Observable/trainable? |
+|---|---|---|
+| **ProRM** | Ideal population loss: local downstream policy regret measured under the target reward | No; it contains the unobserved target reward |
+| **ProRM+** | Repeated-label identification plus Fisher–GMM dual training, implemented with ridge and PCG | Yes, under the stated data contract |
+
+The “+” means that the unobserved ProRM target has been turned into a trainable moment problem. ProRM is
+therefore an ideal target, not a separately implemented baseline or an ablation stage. The repository and
+Python package retain `Smart-Reward-Model` and `smart_reward` as compatibility infrastructure; public
+method terminology is ProRM/ProRM+.
+
+## Current status
+
+| Item | Status |
 |---|---|
-| 数学规格、CPU 数值内核、真实模型管线、artifact、统计聚合 | 已实现 |
-| 测试 | 216 tests；synthetic 只验证链路 |
-| Slurm/Apptainer 控制面 | 已实现 |
-| 经 HPC4 验证的 `.sif`、environment lock、HF offline cache | **尚未固化** |
-| pinned Qwen/Skywork GPU smoke 与五 seed 主实验 | **尚未执行** |
-| “SRM+ 优于 BT”效果结论 | **不存在，仍是待检验假设** |
+| Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
+| Automated test suite | Implemented; synthetic runs validate the pipeline, not an effect claim |
+| Slurm/Apptainer control plane | Implemented |
+| HPC4-validated `.sif`, environment lock and offline Hugging Face cache | **Not yet frozen** |
+| Pinned Qwen/Skywork GPU smoke and five-seed main experiment | **Not yet run** |
+| “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
 
-仓库当前可称为“实验代码与运行控制面就绪”，不能称为“正式 GPU 环境和论文结果已就绪”。
+The code and control plane are ready for environment closure and controlled execution. The repository does
+not yet contain formal HPC4 results.
 
-## 1. 三个公式理解 SRM+
+## 1. From future policy utility to a reward-model loss
 
-### 1.1 下游真正关心的是 update error
+For a candidate reward `r`, let the downstream optimizer return
 
-固定 prompt 分布、reference policy `pi_0=pi_{theta_0}`，以及下一步真正允许更新的 policy
-tangent。定义
+$$
+\theta_r\in\arg\max_\theta
+\left\{
+\mathbb E_{x\sim\rho,y\sim\pi_\theta}[r(x,y)]
+-\beta\mathbb E_{x\sim\rho}
+D_{\mathrm{KL}}(\pi_\theta(\cdot|x)\Vert\pi_0(\cdot|x))
+\right\}.
+$$
+
+The globally correct reward-model criterion is the target-reward utility lost because the optimizer was
+given `r_phi` rather than `r*`. That definition is prospective but bilevel and unobservable. ProRM is its
+local, closed-form counterpart around the reference policy.
+
+Fix the prompt distribution, `pi_0=pi_{theta_0}`, and the exact tangent coordinates that the next policy
+update may change. Define
 
 $$
 s_0(x,y)=\nabla_\theta\log\pi_\theta(y\mid x)|_{\theta_0},\qquad
-F_0=\mathbb E[s_0s_0^\top],\qquad
-g_r=\mathbb E[s_0r(x,y)].
+A_0r=\mathbb E[s_0r(x,y)],\qquad
+F_0=\mathbb E[s_0s_0^\top].
 $$
 
-在局部二阶 KL surrogate 中，reward `r` 产生
-`delta_r=beta^{-1}F_0^dagger g_r`。因此 learned reward `r_phi` 在这个局部 surrogate 上的
-regret 精确等于
+The ideal population ProRM loss is
 
 $$
 \boxed{
-\widetilde{\operatorname{Reg}}(r_\phi)
-=\frac1{2\beta}(g_{r_\phi}-g_*)^\top
-F_0^\dagger(g_{r_\phi}-g_*)
+\mathcal L_{\mathrm{ProRM}}(\phi)
+=\frac1{2\beta}
+\left\|A_0(r_\phi-r^*)\right\|_{F_0^\dagger}^{2}
 }.
 $$
 
-它只惩罚 policy tangent 可见的 reward error。prompt 内常数或 score 零空间中的误差即使
-pointwise MSE 非零，也不会改变当前局部 update。
+In the local quadratic policy problem this is exactly the regret of the update induced by `r_phi` under
+the target reward. Prompt-only shifts and reward errors in the score null space are not penalized because
+they cannot change that update.
 
-### 1.2 Pairwise labels 可以识别 reward moment error
+## 2. From pairwise labels to ProRM+
 
-对同一 prompt 独立采样 `y,y' ~ pi_0`，令
+Sample a natural pair from
 
 $$
-z=s_0(x,y)-s_0(x,y'),\qquad
-t_\phi=r_\phi(x,y)-r_\phi(x,y').
+Q_0(dx,dy,dy')=\rho(dx)\pi_0(dy|x)\pi_0(dy'|x),
 $$
 
-score identity 给出 `g_r=E[z*Delta r]/2`。单个 Bernoulli label 不能逐 edge 无偏恢复 BTL
-logit；SRM+ 对同一 edge 使用随机数量的条件 iid labels，构造 randomized estimator `h`，使
+and define
+
+$$
+z_0=s_0(x,y)-s_0(x,y'),\qquad
+\Delta r_\phi=r_\phi(x,y)-r_\phi(x,y').
+$$
+
+The score identity gives
+
+$$
+A_0r=\frac12\mathbb E_{Q_0}[z_0\Delta r].
+$$
+
+A single Bernoulli preference cannot provide a per-edge unbiased estimate of a BTL logit. ProRM+ obtains
+conditionally iid repeated labels for the same edge and constructs a randomized U-statistic `h` satisfying
 
 $$
 \mathbb E[h\mid e]=\operatorname{logit}(p^*(e))=\Delta r^*(e).
 $$
 
-于是
+Consequently,
 
 $$
 \boxed{
-m_\phi=\frac12\mathbb E[z(t_\phi-h)]
-=g_{r_\phi}-g_*
+m_\phi=\frac12\mathbb E[z_0(\Delta r_\phi-h)]
+=A_0(r_\phi-r^*)
 }.
 $$
 
-### 1.3 有限样本优化 ridge Fisher-GMM
+The two data streams have separate roles:
 
-实现用全部 on-policy node scores `S` 估计 Fisher，用 canonical edge differences `Z`
-估计 moment：
+```text
+Fisher stream:          (x,y) ~ rho*pi_0       -> s_0 -> F_0
+Repeated-label stream:  e ~ Q_0, labels -> h   -> z_0 -> m_phi
+                                                   |
+                                                   v
+                                         Fisher-GMM ProRM+
+```
 
-$$
-\widehat F=\frac1{n_F}S^\top S,\qquad
-\widehat m_\phi=\frac1{2n_E}Z^\top(t_\phi-h),
-$$
+At population level and without damping,
 
 $$
 \boxed{
-\widehat L_\lambda
-=\frac1{2\beta}\widehat m_\phi^\top
-(\widehat F+\lambda I)^{-1}\widehat m_\phi
-},
-\qquad
-\lambda=c\,\operatorname{mean}(\operatorname{diag}\widehat F)>0.
+\min_\phi\max_v\frac1\beta
+\left[v^\top m_\phi-\frac12v^\top F_0v\right]
+=\min_\phi\mathcal L_{\mathrm{ProRM}}(\phi)
+}.
 $$
 
-| 层级 | 可以声称什么 |
+This identity requires natural `Q_0` pairs and the repeated-label assumptions. The three-edge
+[closed-form example](docs/closed_form_example.md) establishes a population ordering reversal between
+BT-MLE and the ideal ProRM target; it does **not** by itself establish the ProRM+ identification theorem.
+That theorem uses the natural `Q_0` expectation above.
+
+## 3. Empirical ridge ProRM+
+
+With all on-policy node scores in `S` and canonical labeled-edge differences in `Z`, the implementation
+uses
+
+$$
+\widehat F_0=\frac1{n_F}S^\top S,
+\qquad
+\widehat m_\phi=\frac1{2n_E}Z^\top(\Delta r_\phi-h),
+$$
+
+and trains the explicitly damped empirical objective
+
+$$
+\boxed{
+\min_\phi\max_v\frac1\beta
+\left[
+v^\top\widehat m_\phi
+-\frac12v^\top(\widehat F_0+\lambda I)v
+\right]
+},
+$$
+
+equivalently,
+
+$$
+\widehat L_\lambda(\phi)
+=\frac1{2\beta}\widehat m_\phi^\top
+(\widehat F_0+\lambda I)^{-1}\widehat m_\phi,
+\qquad
+\lambda=c\,\operatorname{mean}(\operatorname{diag}\widehat F_0)>0.
+$$
+
+| Level | Exact claim |
 |---|---|
-| Population、`lambda=0`、`F_0^dagger` | 与局部二阶 policy regret 精确等价 |
-| Finite sample、`lambda>0` | ridge-regularized empirical surrogate |
-| `c={1e-4,1e-3,1e-2}` | 检查结论是否依赖阻尼尺度 |
+| Population, `lambda=0`, `F_0^dagger` | ProRM+ inner optimum equals local ProRM regret |
+| Finite sample, `lambda>0` | Ridge-regularized empirical surrogate |
+| `c in {1e-4,1e-3,1e-2}` | Preregistered damping sensitivity, not post-hoc tuning |
 
-PCG、detached envelope gradient、二倍因子、randomized estimator 和全部假设见
-[理论规格](docs/theory.md)。
+PCG solves `(F_hat + lambda*I)v=m_hat` without forming a dense Fisher. The reported quadratic value and
+the detached envelope surrogate differ by a factor of two in value but yield the correct gradient; the
+derivation and tests are documented in [theory.md](docs/theory.md).
 
-## 2. Phase 1：一个可识别的算法对照
+## 4. Controlled Phase 1 experiment
 
-研究问题是：
+The fixed question is:
 
-> 在同一个受限 reward class 中，SRM+ 能否比 repeated-label BT-MLE 更准确地恢复
-> operational oracle 所诱导的局部 policy update？
+> Under the same restricted reward class and training budget, does ProRM+ recover the operational-oracle
+> policy-update direction more accurately than repeated-label BT-MLE, and does that advantage survive
+> equal measured-KL policy optimization?
 
-Phase 1 的 `r*` 是冻结并变换后的 Skywork reward-model score，是实验中的
-**operational ground truth**，不是人类真实 utility。该阶段建立 controlled internal
-validity，不允许直接外推成人类偏好结论。
-
-BT 与 SRM+ 共享 candidate、labels、features、零初始化 head、optimizer、步数、GPU 和停止
-规则；唯一改变的是 reward learning objective。这是 controlled paired algorithmic
-contrast，不是对现实部署效果的无条件因果声明。
+The target `r*` in Phase 1 is a train-calibrated transformation of frozen Skywork scores. It is an
+**operational oracle**, not human utility. BT-MLE and ProRM+ share candidates, repeated labels, features,
+zero initialization, optimizer, step count, GPU and stopping rule; only the training objective changes.
 
 ```text
 MultiPref prompts
-    -> pi_0: 4 exact-token candidates / prompt
-       -> LoRA-B scores S ---------> Fisher geometry
-       -> frozen hidden features --> zero-init linear reward class
-       -> frozen oracle -----------> train-only calibration
-                                      -> repeated BTL labels
-                                             |          |
-                                           BT-MLE      SRM+
-                                             \          /
-                                      held-out geometry
-                                               |
-                                  matched measured-KL rollouts
+    -> pi_0: four exact-token candidates per prompt
+       -> fixed-A LoRA-B scores --------> Fisher geometry
+       -> frozen hidden features -------> zero-init linear reward class
+       -> frozen operational oracle ----> train-only calibration
+                                           -> repeated BTL labels
+                                                  |          |
+                                               BT-MLE      ProRM+
+                                                  \          /
+                                           held-out geometry
+                                                    |
+                                      matched measured-KL rollouts
 ```
 
-| 组件 | 锁定设计 |
+| Component | Locked design |
 |---|---|
-| Prompt | MultiPref fixed revision；1536/256/256 prompt-level split |
-| Reference policy | Qwen2.5-0.5B-Instruct fixed revision，FP32 |
-| Candidates | 每 prompt 原分布独立采样 4 个；不筛选、不去重 |
-| Policy tangent | 最后四层 `q_proj/v_proj`，rank-4 fixed-A LoRA-B |
-| Oracle | Skywork-Reward-V2-Qwen3-0.6B fixed revision，FP32 |
-| Labels | candidate `0-1`；`gamma=0.9` randomized repeated BTL labels |
-| Reward class | frozen final-response-token feature + bias-free linear head |
-| Training | 720 fixed steps；BT/SRM 共享全部优化条件 |
-| Evaluation | held-out Fisher geometry + measured sequence-KL `0.01 ± 5%` rollout |
-| Statistics | 5 paired seeds；主 damping + 两档 sensitivity |
+| Prompts | MultiPref pinned revision; `1536/256/256` prompt-level split |
+| Reference policy | Pinned Qwen2.5-0.5B-Instruct, FP32 |
+| Candidates | Four independent base-distribution samples per prompt; no filtering or deduplication |
+| Policy tangent | Last four `q_proj/v_proj` modules, rank-4 fixed-A LoRA-B |
+| Oracle | Pinned Skywork-Reward-V2-Qwen3-0.6B, FP32 |
+| Repeated labels | Canonical candidate `0-1`; geometric continuation `gamma=0.9`, hence `E[N]=10` |
+| Reward class | Frozen final-response-token feature plus bias-free linear head |
+| Training | 720 fixed steps; identical optimization budget |
+| Evaluation | Held-out Fisher geometry plus measured sequence-KL `0.01 ± 5%` rollout |
+| Statistics | Five paired seeds; fixed main damping plus two sensitivity settings |
 
-linear head 施加了可审计的 capacity bottleneck，但“限制容量”本身不逻辑保证 oracle 一定
-不可表示。Phase-1 artifact 因此在 `train_reward_class_projection` 中记录 train-only、
-prompt-centered linear-projection residual；
-它只作机制诊断，不参与调参或 checkpoint 选择。若 residual 接近数值零，只能说明在 train
-candidates 上没有观察到线性不可表示证据；这不能排除 held-out 或 population
-misspecification，但论文不得声称已在训练样本上实证建立 misspecification。
+The capacity bottleneck does not logically guarantee misspecification. The immutable artifact therefore
+records a train-only, prompt-centered linear projection residual under
+`train_reward_class_projection`. It is descriptive mechanism evidence and cannot select a checkpoint,
+damping or conclusion.
 
-## 3. 什么结果才算成功
+## 5. Evidence required for a positive result
 
-本项目不以 pairwise accuracy 上升定义成功。`aggregate.json` 只有在以下条件全部满足时才把
-`pre_registered_evidence.status` 写为 `passed`：
+Pairwise prediction is descriptive. Held-out BTL NLL and oracle-probability MAE measure preference fit;
+they are not success gates. `aggregate.json` may report `passed` only if all preregistered policy evidence
+passes:
 
-| 证据 | 五 seed 的固定判据 |
+| Evidence | Fixed five-seed criterion |
 |---|---|
-| 主阻尼 held-out ridge local-regret proxy | `SRM-BT` mean `<0`，bootstrap upper `<0` |
-| Squared Fisher direction error | `SRM-BT` mean `<0`，bootstrap upper `<0` |
-| Fisher cosine | `SRM-BT` mean `>0`，且方向 Fisher norm 非零 |
-| Matched-KL rollout improvement | 两者均达 KL 容差；`SRM-BT` mean `>0`，bootstrap lower `>0` |
-| Damping sensitivity | 两档 local-regret mean 均 `<0`，PCG 全部收敛 |
-| 数值与身份完整性 | 主链 PCG/KL 收敛，五 seed Git/image/GPU/manifest 身份一致 |
+| Main-damping held-out ridge local-regret proxy | `ProRM+-BT-MLE` mean `<0`, bootstrap upper `<0` |
+| Squared Fisher direction error | `ProRM+-BT-MLE` mean `<0`, bootstrap upper `<0` |
+| Fisher cosine | `ProRM+-BT-MLE` mean `>0`; both direction norms nonzero |
+| Matched-KL rollout improvement | Both methods meet KL tolerance; `ProRM+-BT-MLE` mean `>0`, bootstrap lower `>0` |
+| Damping sensitivity | Both secondary local-regret means `<0`; all required PCG solves converge |
+| Identity and numerical integrity | PCG/KL convergence plus identical Git/image/GPU/manifest identities |
 
-这里的 interval 是对 **5 个预注册 paired seeds** 做的 deterministic percentile-bootstrap
-工程判定区间，不是 population p-value，也不授权使用“统计显著”措辞。
+The percentile-bootstrap interval over five preregistered paired seeds is an engineering decision interval,
+not a population confidence interval or p-value.
 
-| 结果模式 | 允许的结论 |
+| Observed pattern | Permitted conclusion |
 |---|---|
-| Geometry、rollout、sensitivity 全通过 | 支持预注册的 policy-aware mechanism claim |
-| Geometry 通过，rollout 未通过 | 只支持局部 surrogate 改善，未建立 downstream transfer |
-| Geometry 未通过 | 核心机制未获支持 |
-| Sensitivity failure/reversal | 保留失败证据，主结论 `not_passed` |
-| 只有 pairwise accuracy 改善 | 不构成 SRM+ 成功证据 |
+| Geometry, rollout and sensitivity all pass | Supports the preregistered prospective reward-modeling mechanism claim |
+| Geometry passes but rollout fails | Local surrogate improved; downstream transfer not established |
+| Geometry fails | Core mechanism not supported |
+| Sensitivity fails or reverses | Failure remains in evidence; status is `not_passed` |
+| Only NLL/accuracy/probability MAE improves | Not evidence that ProRM+ succeeded |
 
-## 4. 本地快速验证
+No such result is currently claimed.
 
-CPU 数值内核：
+## 6. Local verification
 
 ```bash
 python -m pip install -e ".[dev]"
-smart-reward config-check configs/smoke.yaml
-smart-reward config-check configs/main.yaml
-smart-reward synthetic-check --seed 0 --output outputs/synthetic.json
+prorm config-check configs/smoke.yaml
+prorm config-check configs/main.yaml
+prorm closed-form-check --output outputs/closed-form.json
+prorm synthetic-check --seed 0 --output outputs/synthetic.json
 pytest -q
 ruff check .
 ruff format --check .
 ```
 
-`synthetic-check` 输出固定标记 `benchmark_only=true`，且测试不会断言 SRM+ 必须胜过 BT。
-
-真实 Hugging Face 管线额外安装：
+`closed-form-check` is marked `population_example_only=true`; it verifies the analytic ordering reversal
+without presenting the three-edge distribution as ProRM+ training data. `synthetic-check` is always marked
+`benchmark_only=true`; it validates identities and integration and does not assert that ProRM+ must beat
+BT-MLE. Real Hugging Face execution additionally needs:
 
 ```bash
 python -m pip install -e ".[llm,dev]"
 ```
 
-正式 run 默认 `local_files_only=True`。model/dataset revision 全部由 config 的 commit SHA
-锁定；网页当前 `main`、本地 mtime 或缓存下载时间都不是实验身份。
+`prorm` is the public CLI name. The historical `smart-reward` executable and `smart_reward` import package
+remain compatibility surfaces while artifacts and scripts migrate.
 
-内部单 seed CLI、artifact schema、数据泄漏边界和聚合命令完整写在
-[实验协议](docs/experiment_protocol.md)，不在 README 重复维护。
+## 7. HKUST HPC4 entry
 
-## 5. HKUST HPC4 入口
-
-正式提交前仍有一个现实 blocker：必须在 HPC4 实测驱动/partition 后固化兼容的 Apptainer
-definition、`.sif` SHA256、`pip freeze` 与 pinned HF offline cache。仓库不会猜测未验证的
-CUDA base image。
+The remaining environment blocker is concrete: a driver-compatible Apptainer definition, `.sif` SHA256,
+`pip freeze` and pinned offline Hugging Face cache must be validated on HPC4 before model smoke or a main
+array can be accepted. The repository does not guess an untested CUDA base image.
 
 ```bash
-# 登录节点：只做预检和提交，不加载模型
+# Login node: preflight and submission only.
 bash scripts/hpc4/preflight.sh
 
-export SRM_IMAGE=/project/sigroup/smart-reward-model/images/srm.sif
-export SRM_IMAGE_SHA256="$(sha256sum "${SRM_IMAGE}" | awk '{print $1}')"
-export SRM_HF_CACHE=/project/sigroup/smart-reward-model/hf-cache
+# Canonical public environment names; legacy SRM_* aliases remain accepted.
+export PRORM_IMAGE=/project/sigroup/smart-reward-model/images/prorm.sif
+export PRORM_IMAGE_SHA256="$(sha256sum "${PRORM_IMAGE}" | awk '{print $1}')"
+export PRORM_HF_CACHE=/project/sigroup/smart-reward-model/hf-cache
 
-# 先验收容器，再跑真实模型 smoke
 bash scripts/hpc4/submit_gpu_smoke.sh gpu-l20
-export SRM_SMOKE_WALLTIME=REPLACE_WITH_MEASURED_WALLTIME
-bash scripts/hpc4/submit_controlled.sh configs/smoke.yaml gpu-l20 "${SRM_SMOKE_WALLTIME}"
+export PRORM_SMOKE_WALLTIME=REPLACE_WITH_MEASURED_WALLTIME
+bash scripts/hpc4/submit_controlled.sh configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
 
-# smoke 全通过后，保持同一 image/partition/GPU 型号运行五 seed main array
-export SRM_ARRAY_CONCURRENCY=1
-export SRM_MAIN_WALLTIME=REPLACE_WITH_APPROVED_WALLTIME
-bash scripts/hpc4/submit_controlled.sh configs/main.yaml gpu-l20 "${SRM_MAIN_WALLTIME}"
+export PRORM_ARRAY_CONCURRENCY=1
+export PRORM_MAIN_WALLTIME=REPLACE_WITH_APPROVED_WALLTIME
+bash scripts/hpc4/submit_controlled.sh configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
 ```
 
-wall-time、GPU-hour 和存储预算只能用实际 smoke 记录填写，不能在仓库中虚构。完整的 storage
-layout、offline staging、身份闭环、监控和故障处理见 [HPC4 运行规范](docs/hpc4.md)。
+Wall time, GPU-hours and storage budgets must come from the accepted smoke record. See
+[hpc4.md](docs/hpc4.md) for the complete storage, offline staging, identity and failure contract.
 
-## 6. 文档与代码地图
+## 8. Documentation and code map
 
-| 目标 | 入口 |
+| Goal | Entry point |
 |---|---|
-| 理解全部推导、假设和 contribution boundary | [docs/theory.md](docs/theory.md) |
-| 执行 Phase 0–1、理解指标和产物 | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
-| 在 HPC4 准备环境和提交 Slurm | [docs/hpc4.md](docs/hpc4.md) |
-| 查看正式设计身份 | [configs/main.yaml](configs/main.yaml) |
+| Global-to-local derivation, assumptions and contribution boundary | [docs/theory.md](docs/theory.md) |
+| Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
+| Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
+| HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
+| Formal design identity | [configs/main.yaml](configs/main.yaml) |
 
 ```text
-Smart-Reward-Model/
-├── configs/                  # closed-schema smoke/main configs
-├── docs/                     # theory、experiment protocol、HPC4 runbook
-├── scripts/hpc4/             # preflight、GPU smoke、controlled array
-├── src/smart_reward/
-│   ├── annotations.py        # randomized repeated-label estimator
-│   ├── objective.py          # moment、reported value、envelope gradient
-│   ├── training.py           # paired BT-MLE / SRM+ trainers
-│   ├── phase1.py             # real-model immutable materialization
-│   ├── artifacts.py          # atomic integrity-checked artifact I/O
-│   ├── rollout.py            # natural direction、measured-KL update
-│   ├── phase1_rollout.py     # common-random test rollout
-│   ├── statistics.py         # paired-seed aggregation
-│   └── cli.py                # fail-closed control plane
+Smart-Reward-Model/             # retained repository name
+├── configs/                    # closed-schema smoke/main designs
+├── docs/                       # theory, examples, protocol, HPC4 runbook
+├── scripts/hpc4/               # preflight, GPU smoke, controlled arrays
+├── src/smart_reward/           # retained compatibility package
+│   ├── annotations.py          # randomized repeated-label estimator
+│   ├── objective.py            # moment, reported value, envelope gradient
+│   ├── training.py             # paired BT-MLE / ProRM+ trainers
+│   ├── phase1.py               # immutable real-model materialization
+│   ├── rollout.py              # natural directions and measured-KL updates
+│   ├── statistics.py           # paired-seed aggregation
+│   └── cli.py                  # fail-closed control plane
 └── tests/
 ```
 
-## 7. Claim boundary 与后续顺序
+## 9. Claim boundary and execution order
 
-1. 先完成 validated image/cache、GPU smoke 和 controlled smoke；
-2. 再运行同一环境下的五 seed Phase 1；
-3. 只有 aggregate 全部通过，才启动高容量 LoRA reward-model scale-up；
-4. 最后做 CoVal human robustness。
+1. Freeze and validate the image, environment lock and offline cache.
+2. Pass GPU environment smoke and the controlled model smoke.
+3. Run the five paired Phase 1 seeds without changing design identity.
+4. Aggregate only complete identity-matched runs.
+5. Scale reward-model capacity only after the controlled mechanism result is known.
+6. Treat CoVal as human-label robustness, not as a test of the exact Phase 1 theorem.
 
-CoVal 的固定有限 labels 只能识别 logit series 的截断，因此该阶段必须称为
-**candidate-restricted truncated SRM+ robustness**，不能援引 Phase 1 的精确无偏定理，
-也不能把 transformed Skywork operational ground truth 外推成人类 utility。
+With fixed finite labels, CoVal identifies only a truncated logit series. It must be reported as
+**candidate-restricted truncated ProRM+ robustness** and cannot inherit the exact unbiasedness or human-
+utility interpretation of the controlled experiment.
 
-理论基础与本项目的组合贡献边界见 [docs/theory.md](docs/theory.md) 最后一节。官方工程资产：
+Primary engineering dependencies and data/model assets:
 
 - [PyTorch](https://docs.pytorch.org/docs/stable/index.html)
 - [Transformers chat templates](https://huggingface.co/docs/transformers/chat_templating)

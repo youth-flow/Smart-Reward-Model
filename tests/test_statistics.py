@@ -23,22 +23,22 @@ def _five_seed_tables() -> tuple[dict[int, dict[str, float]], dict[int, dict[str
         14: {"test_local_regret": 8.0, "fisher_cosine": 0.5},
         15: {"test_local_regret": 9.0, "fisher_cosine": 0.6},
     }
-    srm = {
+    prorm_plus = {
         11: {"test_local_regret": 4.0, "fisher_cosine": 0.3},
         12: {"test_local_regret": 5.0, "fisher_cosine": 0.5},
         13: {"test_local_regret": 8.0, "fisher_cosine": 0.3},
         14: {"test_local_regret": 11.0, "fisher_cosine": 0.9},
         15: {"test_local_regret": 10.0, "fisher_cosine": 0.6},
     }
-    return bt, srm
+    return bt, prorm_plus
 
 
 def test_known_paired_arithmetic_and_direction_metadata() -> None:
-    bt, srm = _five_seed_tables()
+    bt, prorm_plus = _five_seed_tables()
 
     aggregate = aggregate_paired_metrics(
         bt,
-        srm,
+        prorm_plus,
         bootstrap_seed=20260722,
         num_resamples=2_000,
     )
@@ -46,18 +46,28 @@ def test_known_paired_arithmetic_and_direction_metadata() -> None:
     regret = summaries["test_local_regret"]
 
     # Paired differences are [-1, -1, 1, 3, 1].
-    assert [item.srm_minus_bt for item in regret.per_seed] == [-1.0, -1.0, 1.0, 3.0, 1.0]
+    assert [item.prorm_plus_minus_bt for item in regret.per_seed] == [
+        -1.0,
+        -1.0,
+        1.0,
+        3.0,
+        1.0,
+    ]
     assert regret.paired_mean == pytest.approx(0.6)
     assert regret.sample_std == pytest.approx(math.sqrt(2.8))
     assert regret.standard_error == pytest.approx(math.sqrt(2.8 / 5.0))
     assert regret.direction is MetricDirection.LOWER_IS_BETTER
-    assert regret.favorable_srm_minus_bt_sign == "negative"
+    assert regret.favorable_prorm_plus_minus_bt_sign == "negative"
     assert summaries["fisher_cosine"].direction is MetricDirection.HIGHER_IS_BETTER
-    assert summaries["fisher_cosine"].favorable_srm_minus_bt_sign == "positive"
+    assert summaries["fisher_cosine"].favorable_prorm_plus_minus_bt_sign == "positive"
 
     payload = aggregate.to_dict()
+    assert payload["schema_version"] == "paired-seed-aggregate/v2"
     assert payload["num_seeds"] == 5
     assert payload["metrics"]["test_local_regret"]["paired_mean"] == pytest.approx(0.6)
+    first_seed = payload["metrics"]["test_local_regret"]["per_seed"][0]
+    assert "prorm_plus" in first_seed and "prorm_plus_minus_bt" in first_seed
+    assert "srm" not in first_seed and "srm_minus_bt" not in first_seed
     assert "significant" not in json.dumps(payload)
 
 
@@ -103,7 +113,7 @@ def test_constant_difference_has_exact_percentile_interval() -> None:
 
 
 @pytest.mark.parametrize(
-    ("bt", "srm", "message"),
+    ("bt", "prorm_plus", "message"),
     [
         (
             {1: {"local_regret": 1.0}, 2: {"local_regret": 2.0}},
@@ -124,31 +134,31 @@ def test_constant_difference_has_exact_percentile_interval() -> None:
 )
 def test_pairing_and_metric_sets_fail_closed(
     bt: dict[int, dict[str, float]],
-    srm: dict[int, dict[str, float]],
+    prorm_plus: dict[int, dict[str, float]],
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        aggregate_paired_metrics(bt, srm, bootstrap_seed=1, num_resamples=10)
+        aggregate_paired_metrics(bt, prorm_plus, bootstrap_seed=1, num_resamples=10)
 
 
 @pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
 def test_nonfinite_metrics_are_rejected(invalid: float) -> None:
     bt = {1: {"local_regret": 1.0}, 2: {"local_regret": 2.0}}
-    srm = {1: {"local_regret": 0.5}, 2: {"local_regret": invalid}}
+    prorm_plus = {1: {"local_regret": 0.5}, 2: {"local_regret": invalid}}
 
     with pytest.raises(ValueError, match="finite"):
-        aggregate_paired_metrics(bt, srm, bootstrap_seed=1, num_resamples=10)
+        aggregate_paired_metrics(bt, prorm_plus, bootstrap_seed=1, num_resamples=10)
 
 
 def test_unknown_metric_requires_explicit_direction() -> None:
     bt = {1: {"custom_score": 1.0}, 2: {"custom_score": 2.0}}
-    srm = {1: {"custom_score": 2.0}, 2: {"custom_score": 4.0}}
+    prorm_plus = {1: {"custom_score": 2.0}, 2: {"custom_score": 4.0}}
 
     with pytest.raises(ValueError, match="no locked direction"):
-        aggregate_paired_metrics(bt, srm, bootstrap_seed=1, num_resamples=10)
+        aggregate_paired_metrics(bt, prorm_plus, bootstrap_seed=1, num_resamples=10)
     aggregate = aggregate_paired_metrics(
         bt,
-        srm,
+        prorm_plus,
         directions={"custom_score": "higher_is_better"},
         bootstrap_seed=1,
         num_resamples=10,
@@ -157,10 +167,10 @@ def test_unknown_metric_requires_explicit_direction() -> None:
 
 
 def test_atomic_writer_replaces_json_and_leaves_no_temporary_file(tmp_path: Path) -> None:
-    bt, srm = _five_seed_tables()
+    bt, prorm_plus = _five_seed_tables()
     aggregate = aggregate_paired_metrics(
         bt,
-        srm,
+        prorm_plus,
         bootstrap_seed=8,
         num_resamples=100,
     )

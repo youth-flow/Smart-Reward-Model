@@ -13,9 +13,12 @@ from smart_reward.training import (
     BTMLETrainingConfig,
     FeatureTrainingBatch,
     FrozenFeatureLinearReward,
+    ProRMPlusTrainer,
+    ProRMPlusTrainingConfig,
     SRMPlusTrainer,
     SRMPlusTrainingConfig,
     evaluate_bt_mle,
+    evaluate_prorm_plus,
     evaluate_srm_plus,
 )
 
@@ -74,8 +77,8 @@ def _misspecified_toy() -> FeatureTrainingBatch:
     )
 
 
-def _srm_config(*, microbatch_size: int | None = 3) -> SRMPlusTrainingConfig:
-    return SRMPlusTrainingConfig(
+def _prorm_config(*, microbatch_size: int | None = 3) -> ProRMPlusTrainingConfig:
+    return ProRMPlusTrainingConfig(
         learning_rate=0.1,
         optimizer="sgd",
         microbatch_size=microbatch_size,
@@ -84,6 +87,12 @@ def _srm_config(*, microbatch_size: int | None = 3) -> SRMPlusTrainingConfig:
         pcg_max_iterations=20,
         pcg_tolerance=1.0e-12,
     )
+
+
+def test_legacy_srm_api_names_alias_canonical_prorm_api() -> None:
+    assert SRMPlusTrainer is ProRMPlusTrainer
+    assert SRMPlusTrainingConfig is ProRMPlusTrainingConfig
+    assert evaluate_srm_plus is evaluate_prorm_plus
 
 
 def test_frozen_feature_head_is_bias_free_zero_or_explicitly_initialized() -> None:
@@ -131,12 +140,12 @@ def test_tensor_bundle_enforces_frozen_dtype_shape_counts_and_orientation() -> N
         FeatureTrainingBatch(**values)
 
 
-def test_bt_and_srm_each_reduce_its_own_objective_on_misspecified_toy() -> None:
+def test_bt_and_prorm_each_reduce_its_own_objective_on_misspecified_toy() -> None:
     batch = _misspecified_toy()
     shared_initialization = torch.tensor([0.0, 0.0], dtype=torch.float64)
     bt_model = FrozenFeatureLinearReward(2, shared_initialization)
-    srm_model = FrozenFeatureLinearReward(2, shared_initialization)
-    assert torch.equal(bt_model.weight, srm_model.weight)
+    prorm_model = FrozenFeatureLinearReward(2, shared_initialization)
+    assert torch.equal(bt_model.weight, prorm_model.weight)
 
     bt_before = evaluate_bt_mle(bt_model, batch)
     bt_trainer = BTMLETrainer(
@@ -151,25 +160,25 @@ def test_bt_and_srm_each_reduce_its_own_objective_on_misspecified_toy() -> None:
     bt_trainer.fit(100)
     bt_after = bt_trainer.evaluate()
 
-    config = _srm_config()
-    srm_before = evaluate_srm_plus(srm_model, batch, config).dual_loss
-    srm_trainer = SRMPlusTrainer(srm_model, batch, config)
-    srm_trainer.fit(100)
-    srm_after = srm_trainer.evaluate().dual_loss
+    config = _prorm_config()
+    prorm_before = evaluate_prorm_plus(prorm_model, batch, config).dual_loss
+    prorm_trainer = ProRMPlusTrainer(prorm_model, batch, config)
+    prorm_trainer.fit(100)
+    prorm_after = prorm_trainer.evaluate().dual_loss
 
     assert bt_after < 0.9 * bt_before
-    assert srm_after < 0.1 * srm_before
+    assert prorm_after < 0.1 * prorm_before
     # The restricted class forces the policy-aware and likelihood projections
     # to select genuinely different reward heads.
-    assert not torch.allclose(bt_model.weight, srm_model.weight, atol=0.03, rtol=0.0)
+    assert not torch.allclose(bt_model.weight, prorm_model.weight, atol=0.03, rtol=0.0)
 
 
-def test_one_srm_envelope_step_matches_exact_quadratic_gradient() -> None:
+def test_one_prorm_envelope_step_matches_exact_quadratic_gradient() -> None:
     batch = _misspecified_toy()
     initial = torch.tensor([0.17, -0.31], dtype=torch.float64)
     model = FrozenFeatureLinearReward(2, initial)
     learning_rate = 0.07
-    config = SRMPlusTrainingConfig(
+    config = ProRMPlusTrainingConfig(
         learning_rate=learning_rate,
         optimizer="sgd",
         microbatch_size=3,
@@ -192,7 +201,7 @@ def test_one_srm_envelope_step_matches_exact_quadratic_gradient() -> None:
     )
     expected_weight = initial - learning_rate * expected_gradient
 
-    trainer = SRMPlusTrainer(model, batch, config)
+    trainer = ProRMPlusTrainer(model, batch, config)
     diagnostic = trainer.step()
 
     assert torch.allclose(model.weight, expected_weight, atol=2.0e-14, rtol=1.0e-13)
@@ -208,7 +217,7 @@ def test_one_srm_envelope_step_matches_exact_quadratic_gradient() -> None:
     assert not trainer.dual_direction.requires_grad
 
 
-def test_srm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) -> None:
+def test_prorm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) -> None:
     batch = _misspecified_toy()
     model = FrozenFeatureLinearReward(2, dtype=torch.float64)
     optimizer = torch.optim.SGD([model.weight], lr=0.05)
@@ -222,7 +231,7 @@ def test_srm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) -> N
 
     monkeypatch.setattr(optimizer, "step", counted_optimizer_step)
     dual_calls: list[tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]] = []
-    original_solve = training_module._solve_srm_dual
+    original_solve = training_module._solve_prorm_dual
 
     def counted_solve(batch_arg, margins, config, warm_start):
         result = original_solve(batch_arg, margins, config, warm_start)
@@ -235,8 +244,8 @@ def test_srm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) -> N
         )
         return result
 
-    monkeypatch.setattr(training_module, "_solve_srm_dual", counted_solve)
-    trainer = SRMPlusTrainer(model, batch, _srm_config(), optimizer=optimizer)
+    monkeypatch.setattr(training_module, "_solve_prorm_dual", counted_solve)
+    trainer = ProRMPlusTrainer(model, batch, _prorm_config(), optimizer=optimizer)
     diagnostics = trainer.fit(3)
 
     assert optimizer_updates == 3
@@ -269,15 +278,15 @@ def test_global_orientation_swap_preserves_both_objectives_and_updates() -> None
     BTMLETrainer(swapped_bt, swapped, bt_config).step()
     assert torch.allclose(original_bt.weight, swapped_bt.weight, atol=1.0e-15, rtol=0.0)
 
-    original_srm = FrozenFeatureLinearReward(2, initial)
-    swapped_srm = FrozenFeatureLinearReward(2, initial)
-    config = _srm_config()
-    original_value = evaluate_srm_plus(original_srm, batch, config)
-    swapped_value = evaluate_srm_plus(swapped_srm, swapped, config)
+    original_prorm = FrozenFeatureLinearReward(2, initial)
+    swapped_prorm = FrozenFeatureLinearReward(2, initial)
+    config = _prorm_config()
+    original_value = evaluate_prorm_plus(original_prorm, batch, config)
+    swapped_value = evaluate_prorm_plus(swapped_prorm, swapped, config)
     assert original_value.dual_loss == pytest.approx(swapped_value.dual_loss, rel=1.0e-15)
-    SRMPlusTrainer(original_srm, batch, config).step()
-    SRMPlusTrainer(swapped_srm, swapped, config).step()
-    assert torch.allclose(original_srm.weight, swapped_srm.weight, atol=1.0e-15, rtol=0.0)
+    ProRMPlusTrainer(original_prorm, batch, config).step()
+    ProRMPlusTrainer(swapped_prorm, swapped, config).step()
+    assert torch.allclose(original_prorm.weight, swapped_prorm.weight, atol=1.0e-15, rtol=0.0)
 
 
 def test_bt_count_objective_and_gradient_equal_expanded_binary_labels() -> None:
@@ -313,7 +322,7 @@ def test_bt_count_objective_and_gradient_equal_expanded_binary_labels() -> None:
     assert torch.allclose(count_gradient, collapsed_gradient, atol=1.0e-15, rtol=0.0)
 
 
-@pytest.mark.parametrize("kind", ["bt", "srm"])
+@pytest.mark.parametrize("kind", ["bt", "prorm_plus"])
 def test_microbatch_accumulation_matches_one_full_batch_update(kind: str) -> None:
     batch = _misspecified_toy()
     initial = torch.tensor([0.11, -0.09], dtype=torch.float64)
@@ -330,12 +339,12 @@ def test_microbatch_accumulation_matches_one_full_batch_update(kind: str) -> Non
         full_diagnostic = BTMLETrainer(full_model, batch, full_config).step()
         micro_diagnostic = BTMLETrainer(micro_model, batch, micro_config).step()
     else:
-        full_diagnostic = SRMPlusTrainer(
+        full_diagnostic = ProRMPlusTrainer(
             full_model,
             batch,
-            _srm_config(microbatch_size=None),
+            _prorm_config(microbatch_size=None),
         ).step()
-        micro_diagnostic = SRMPlusTrainer(micro_model, batch, _srm_config()).step()
+        micro_diagnostic = ProRMPlusTrainer(micro_model, batch, _prorm_config()).step()
 
     assert torch.allclose(full_model.weight, micro_model.weight, atol=2.0e-15, rtol=1.0e-14)
     assert full_diagnostic.objective == pytest.approx(micro_diagnostic.objective, rel=1.0e-14)
@@ -344,7 +353,7 @@ def test_microbatch_accumulation_matches_one_full_batch_update(kind: str) -> Non
     )
 
 
-@pytest.mark.parametrize("kind", ["bt", "srm"])
+@pytest.mark.parametrize("kind", ["bt", "prorm_plus"])
 def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str) -> None:
     batch = _misspecified_toy()
     first_model = FrozenFeatureLinearReward(2, dtype=torch.float64)
@@ -358,18 +367,20 @@ def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str
         first = BTMLETrainer(first_model, batch, config)
         restored = BTMLETrainer(restored_model, batch, config)
     else:
-        config = SRMPlusTrainingConfig(
+        config = ProRMPlusTrainingConfig(
             learning_rate=0.03,
             optimizer="adamw",
             microbatch_size=3,
             damping=0.2,
             pcg_tolerance=1.0e-12,
         )
-        first = SRMPlusTrainer(first_model, batch, config)
-        restored = SRMPlusTrainer(restored_model, batch, config)
+        first = ProRMPlusTrainer(first_model, batch, config)
+        restored = ProRMPlusTrainer(restored_model, batch, config)
 
     first.fit(4)
     checkpoint = first.state_dict()
+    assert checkpoint["format_version"] == 2
+    assert checkpoint["trainer"] == ("bt_mle" if kind == "bt" else "prorm_plus")
     untouched_checkpoint = copy.deepcopy(checkpoint)
     restored.load_state_dict(checkpoint)
     first.step()
@@ -380,16 +391,33 @@ def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str
     assert first.history == restored.history
     # Loading and subsequent optimization must not mutate the caller-owned dict.
     assert torch.equal(checkpoint["model"]["weight"], untouched_checkpoint["model"]["weight"])
-    if kind == "srm":
+    if kind == "prorm_plus":
         assert first.dual_refreshes == restored.dual_refreshes == 5
         assert torch.equal(first.dual_direction, restored.dual_direction)
 
 
-def test_srm_diagnostics_include_residual_dual_value_and_gradient_norm() -> None:
-    trainer = SRMPlusTrainer(
+def test_prorm_trainer_reads_legacy_v1_checkpoint() -> None:
+    batch = _misspecified_toy()
+    config = _prorm_config()
+    source = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    source.fit(2)
+    legacy = copy.deepcopy(source.state_dict())
+    legacy["format_version"] = 1
+    legacy["trainer"] = "srm_plus"
+
+    restored = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    restored.load_state_dict(legacy)
+
+    assert torch.equal(restored.model.weight, source.model.weight)
+    assert torch.equal(restored.dual_direction, source.dual_direction)
+    assert restored.history == source.history
+
+
+def test_prorm_diagnostics_include_residual_dual_value_and_gradient_norm() -> None:
+    trainer = ProRMPlusTrainer(
         FrozenFeatureLinearReward(2, dtype=torch.float64),
         _misspecified_toy(),
-        _srm_config(),
+        _prorm_config(),
     )
     diagnostic = trainer.step()
 
@@ -402,7 +430,7 @@ def test_srm_diagnostics_include_residual_dual_value_and_gradient_norm() -> None
     assert math.isfinite(diagnostic.gradient_norm)
 
 
-@pytest.mark.parametrize("kind", ["bt", "srm"])
+@pytest.mark.parametrize("kind", ["bt", "prorm_plus"])
 def test_optional_gradient_clipping_bounds_one_sgd_update(kind: str) -> None:
     batch = _misspecified_toy()
     model = FrozenFeatureLinearReward(2, dtype=torch.float64)
@@ -416,14 +444,14 @@ def test_optional_gradient_clipping_bounds_one_sgd_update(kind: str) -> None:
         )
         diagnostic = BTMLETrainer(model, batch, config).step()
     else:
-        config = SRMPlusTrainingConfig(
+        config = ProRMPlusTrainingConfig(
             learning_rate=learning_rate,
             optimizer="sgd",
             max_grad_norm=max_norm,
             damping=0.2,
             pcg_tolerance=1.0e-12,
         )
-        diagnostic = SRMPlusTrainer(model, batch, config).step()
+        diagnostic = ProRMPlusTrainer(model, batch, config).step()
 
     assert diagnostic.gradient_norm > max_norm
     assert torch.linalg.vector_norm(model.weight).item() <= learning_rate * max_norm * 1.000001

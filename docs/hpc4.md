@@ -5,6 +5,11 @@
 `gpu-a30`、`gpu-l20`、`gpu-rtx5880`、`gpu-rtx4090d`。邮件没有证明当前 QoS、wall-time、
 显存、驱动、节点健康或计算节点外网；这些都必须在首次登录和 GPU smoke job 中实测。
 
+正式方法名是 ProRM+，正式对照是 repeated-label BT-MLE。仓库目录
+`Smart-Reward-Model`、Python package `smart_reward` 和 project/scratch 路径作为兼容基础设施
+保留。公开 CLI 为 `prorm`，公开 environment keys 统一为 `PRORM_*`；旧 `SRM_*` keys 只作为
+迁移期兼容 alias 被脚本接受。
+
 ## 0. 从登录到结论的六个门
 
 | Gate | 执行动作 | 通过标准 | 失败后 |
@@ -12,7 +17,7 @@
 | 1. Account | `preflight.sh` | quota、partition、project/scratch、Apptainer 可用 | 不申请 GPU |
 | 2. Image | SHA256 + offline cache check | image/cache 存在且 digest 正确 | 重新 staging |
 | 3. CUDA | `submit_gpu_smoke.sh` | 单 GPU、版本、Qwen3 class、`pip check` 全通过 | 修 image/partition |
-| 4. Model smoke | `submit_controlled.sh configs/smoke.yaml ...` | artifact、BT/SRM、KL、rollout、memory evidence 完整 | 定位实现或容量问题 |
+| 4. Model smoke | `submit_controlled.sh configs/smoke.yaml ...` | artifact、BT-MLE/ProRM+、KL、rollout、memory evidence 完整 | 定位实现或容量问题 |
 | 5. Main | 同一环境提交 `configs/main.yaml` | 五个 paired seeds 主链完整 | 保留失败证据后诊断 |
 | 6. Aggregate | `aggregate-results` | 身份一致并写出预注册判据 | 不手改结果 |
 
@@ -104,17 +109,17 @@ smoke 前的明确 blocker。**
 在兼容 image 和 snapshots 准备好后，把它们放进 project，再计算 digest：
 
 ```bash
-export SRM_IMAGE=/project/sigroup/smart-reward-model/images/srm.sif
-export SRM_IMAGE_SHA256="$(sha256sum "${SRM_IMAGE}" | awk '{print $1}')"
-export SRM_HF_CACHE=/project/sigroup/smart-reward-model/hf-cache
+export PRORM_IMAGE=/project/sigroup/smart-reward-model/images/prorm.sif
+export PRORM_IMAGE_SHA256="$(sha256sum "${PRORM_IMAGE}" | awk '{print $1}')"
+export PRORM_HF_CACHE=/project/sigroup/smart-reward-model/hf-cache
 
-test -f "${SRM_IMAGE}"
-test -d "${SRM_HF_CACHE}"
-printf '%s  %s\n' "${SRM_IMAGE_SHA256}" "${SRM_IMAGE}" \
+test -f "${PRORM_IMAGE}"
+test -d "${PRORM_HF_CACHE}"
+printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
   | sha256sum --check
 ```
 
-`SRM_IMAGE` 必须是绝对路径，`SRM_IMAGE_SHA256` 必须是 64 位小写 hex；submit 和 compute
+`PRORM_IMAGE` 必须是绝对路径，`PRORM_IMAGE_SHA256` 必须是 64 位小写 hex；submit 和 compute
 脚本都会再次校验。cache 至少要能离线解析 `configs/*.yaml` 中以下固定资产：
 
 - `allenai/multipref` dataset revision；
@@ -125,9 +130,9 @@ printf '%s  %s\n' "${SRM_IMAGE_SHA256}" "${SRM_IMAGE}" \
 设置：
 
 ```text
-HF_HOME=$SRM_HF_CACHE
-HF_HUB_CACHE=$SRM_HF_CACHE/hub
-HF_DATASETS_CACHE=$SRM_HF_CACHE/datasets
+HF_HOME=$PRORM_HF_CACHE
+HF_HUB_CACHE=$PRORM_HF_CACHE/hub
+HF_DATASETS_CACHE=$PRORM_HF_CACHE/datasets
 TRANSFORMERS_OFFLINE=1
 HF_DATASETS_OFFLINE=1
 ```
@@ -193,13 +198,13 @@ submit_controlled.sh <config.yaml> <gpu-partition> <walltime>
 
 `walltime` 只能是 `HH:MM:SS` 或 `D-HH:MM:SS`。先用 smoke config，时间根据本集群实测
 填写，不在仓库中虚构。formal config 必须是 repo 内已跟踪文件，controlled job 会拒绝
-dirty worktree，并把 `HEAD` 作为 `SRM_GIT_COMMIT` producer identity：
+dirty worktree，并把 `HEAD` 作为 `PRORM_GIT_COMMIT` producer identity：
 
 ```bash
 cd /absolute/path/to/Smart-Reward-Model
-export SRM_SMOKE_WALLTIME=REPLACE_WITH_MEASURED_WALLTIME
+export PRORM_SMOKE_WALLTIME=REPLACE_WITH_MEASURED_WALLTIME
 bash scripts/hpc4/submit_controlled.sh \
-  configs/smoke.yaml gpu-l20 "${SRM_SMOKE_WALLTIME}"
+  configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
 ```
 
 检查 Slurm log 与 project run output，确认下列步骤全部完成：
@@ -208,7 +213,8 @@ bash scripts/hpc4/submit_controlled.sh \
 2. 用 `env-report --seed` 写 seed-specific `run-manifest.json`；
 3. 离线加载 pinned MultiPref/Qwen/Skywork，创建或完整校验 Phase-1 artifact；
 4. `controlled-compare --run-manifest` 先绑定 manifest SHA、formal environment 与 artifact
-   producer，再在 config 声明的 damping（main 为三档）运行 fixed-step paired BT/SRM+；
+   producer，再在 config 声明的 damping（main 为三档）运行 fixed-step paired
+   BT-MLE/ProRM+；
 5. 从主 damping head 构造两个 policy direction，分别匹配 measured KL；
 6. 用 common-random test rollouts 和冻结 oracle transform 写 rollout evidence；
 7. trap 将小型最终证据同步到 project。
@@ -234,14 +240,14 @@ array concurrency 只改变 campaign makespan，不减少总 GPU-hours。
 smoke 通过后，在**同一 partition/GPU 型号**提交 main 五 seed array：
 
 ```bash
-export SRM_ARRAY_CONCURRENCY=1
-export SRM_MAIN_WALLTIME=REPLACE_WITH_APPROVED_WALLTIME
+export PRORM_ARRAY_CONCURRENCY=1
+export PRORM_MAIN_WALLTIME=REPLACE_WITH_APPROVED_WALLTIME
 bash scripts/hpc4/submit_controlled.sh \
-  configs/main.yaml gpu-l20 "${SRM_MAIN_WALLTIME}"
+  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
 ```
 
 submit 脚本在 validated image 内读取 config 的 seed 数，自动形成
-`--array=0-(seed_count-1)%$SRM_ARRAY_CONCURRENCY`。`SRM_ARRAY_CONCURRENCY` 必须是正整数；
+`--array=0-(seed_count-1)%$PRORM_ARRAY_CONCURRENCY`。`PRORM_ARRAY_CONCURRENCY` 必须是正整数；
 没有明确预算时保持 1。
 
 ## 7. 作业内的可复现与恢复语义
@@ -249,7 +255,7 @@ submit 脚本在 validated image 内读取 config 的 seed 数，自动形成
 `controlled.sbatch` 不依赖 shell 当前的 Python，所有 Python 命令均在同一 clean Apptainer
 环境中执行。它把 repo、job staging 和 HF cache bind 到容器，并设置 `PYTHONPATH` 为提交
 commit 的 `src`。manifest 的 `selected_seed` 必须等于 array task 对应 seed；CUDA comparison
-还要求 clean Git、`SRM_GIT_COMMIT==HEAD`、image SHA、Slurm account `sigroup`、partition、
+还要求 clean Git、`PRORM_GIT_COMMIT==HEAD`、image SHA、Slurm account `sigroup`、partition、
 CUDA 可见且恰好一个有名称的 GPU。comparison 保存 manifest bytes SHA 与解析后的 formal
 environment identity；rollout 再将当前进程与该 identity 逐字段匹配并写回结果。
 
@@ -281,7 +287,7 @@ scale-up 才需要另行设计原子 checkpoint/resume contract。
 squeue -u "$USER"
 job_id=REPLACE_WITH_JOB_ID
 sacct -j "${job_id}" --format=JobID,State,Elapsed,ExitCode,AllocTRES
-tail -n 200 logs/srm-controlled-ARRAY_JOB_TASK.out
+tail -n 200 logs/prorm-controlled-ARRAY_JOB_TASK.out
 ```
 
 每个 seed 只有同时满足以下条件才算有效：
@@ -293,7 +299,7 @@ tail -n 200 logs/srm-controlled-ARRAY_JOB_TASK.out
 - artifact identity/integrity 检查通过；
 - 主阻尼 comparison 存在且 PCG converged；每档 sensitivity 要么有完整结果，要么有显式
   failure record，任何 sensitivity seed 都不能被静默删除；
-- BT/SRM measured KL 各自在 `0.01 ± 5%`，rollout 文件完整；
+- BT-MLE/ProRM+ measured KL 各自在 `0.01 ± 5%`，rollout 文件完整；
 - 该 seed 没有读取 test 进行训练/选择，也没有手工改动产物。
 
 OOM、offline snapshot missing、主阻尼训练 PCG、rollout direction PCG、measured-KL、hash
@@ -307,7 +313,7 @@ Slurm array 不自动做跨 seed 聚合。五个 job 全部验收后，在同一
 显式列出五个 comparison 文件：
 
 ```bash
-smart-reward aggregate-results configs/main.yaml aggregate.json \
+prorm aggregate-results configs/main.yaml aggregate.json \
   PATH_TO_20260722_COMPARISON.json \
   PATH_TO_20260723_COMPARISON.json \
   PATH_TO_20260724_COMPARISON.json \

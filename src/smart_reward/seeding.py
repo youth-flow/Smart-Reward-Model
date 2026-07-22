@@ -1,4 +1,4 @@
-"""Named random streams for paired, reproducible SRM+/BT experiments."""
+"""Named random streams for paired, reproducible ProRM+/BT experiments."""
 
 from __future__ import annotations
 

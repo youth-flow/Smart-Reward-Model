@@ -1,13 +1,13 @@
-"""Deterministic frozen-feature training loops for BT-MLE and SRM+.
+"""Deterministic frozen-feature training loops for BT-MLE and ProRM+.
 
-The SRM+ loop in this module deliberately implements one, and only one,
+The ProRM+ loop in this module deliberately implements one, and only one,
 reward-model optimizer update per freshly solved dual problem::
 
     full margins -> moment -> warm-started PCG -> detach direction
                  -> one optimizer step -> repeat
 
 ``microbatch_size`` only changes how that *full-batch* gradient is accumulated.
-It never turns the SRM+ moment into a stochastic minibatch estimate and never
+It never turns the ProRM+ moment into a stochastic minibatch estimate and never
 reuses a stale dual direction after a parameter update.
 """
 
@@ -23,6 +23,13 @@ import torch
 from torch import nn
 
 from .baseline import repeated_btl_nll
+from .contracts import (
+    BT_MLE,
+    CHECKPOINT_FORMAT_V1,
+    CHECKPOINT_FORMAT_V2,
+    LEGACY_SRM_PLUS,
+    PRORM_PLUS,
+)
 from .linear import DampedEmpiricalFisher
 from .objective import (
     dual_loss,
@@ -336,8 +343,8 @@ class BTMLETrainingConfig:
 
 
 @dataclass(frozen=True)
-class SRMPlusTrainingConfig:
-    """Fixed SRM+ objective, optimizer, and PCG settings."""
+class ProRMPlusTrainingConfig:
+    """Fixed ProRM+ objective, optimizer, and PCG settings."""
 
     learning_rate: float = 1.0e-2
     optimizer: OptimizerName = "adamw"
@@ -379,7 +386,7 @@ class TrainingStepDiagnostics:
     """Scalar evidence recorded for one parameter update.
 
     ``objective`` is evaluated at the parameters *before* the update whose
-    gradient norm is reported.  For SRM+ it equals ``dual_loss``.
+    gradient norm is reported.  For ProRM+ it equals ``dual_loss``.
     """
 
     step: int
@@ -420,8 +427,8 @@ class TrainingStepDiagnostics:
 
 
 @dataclass(frozen=True)
-class SRMEvaluation:
-    """Full-data SRM+ value and numerical solve evidence."""
+class ProRMPlusEvaluation:
+    """Full-data ProRM+ value and numerical solve evidence."""
 
     moment: torch.Tensor
     direction: torch.Tensor
@@ -531,10 +538,10 @@ def _check_updated_model(model: FrozenFeatureLinearReward) -> None:
         raise FloatingPointError("optimizer produced a non-finite reward head")
 
 
-def _solve_srm_dual(
+def _solve_prorm_dual(
     batch: FeatureTrainingBatch,
     margins: torch.Tensor,
-    config: SRMPlusTrainingConfig,
+    config: ProRMPlusTrainingConfig,
     warm_start: torch.Tensor | None,
 ) -> tuple[torch.Tensor, DampedEmpiricalFisher, PCGResult]:
     moment = empirical_moment(batch.edge_scores, margins, batch.h)
@@ -574,18 +581,18 @@ def evaluate_bt_mle(
 
 
 @torch.no_grad()
-def evaluate_srm_plus(
+def evaluate_prorm_plus(
     model: FrozenFeatureLinearReward,
     batch: FeatureTrainingBatch,
-    config: SRMPlusTrainingConfig | None = None,
+    config: ProRMPlusTrainingConfig | None = None,
     *,
     warm_start: torch.Tensor | None = None,
-) -> SRMEvaluation:
-    """Evaluate SRM+ on all edges and return PCG residual diagnostics."""
+) -> ProRMPlusEvaluation:
+    """Evaluate ProRM+ on all edges and return PCG residual diagnostics."""
 
-    effective_config = SRMPlusTrainingConfig() if config is None else config
-    if not isinstance(effective_config, SRMPlusTrainingConfig):
-        raise TypeError("config must be an SRMPlusTrainingConfig")
+    effective_config = ProRMPlusTrainingConfig() if config is None else config
+    if not isinstance(effective_config, ProRMPlusTrainingConfig):
+        raise TypeError("config must be a ProRMPlusTrainingConfig")
     _validate_model_batch(model, batch)
     if warm_start is not None:
         if not isinstance(warm_start, torch.Tensor):
@@ -600,7 +607,7 @@ def evaluate_srm_plus(
         if not bool(torch.isfinite(warm_start).all()):
             raise ValueError("warm_start must be finite")
     margins = _full_margins(model, batch, effective_config.microbatch_size)
-    moment, operator, result = _solve_srm_dual(
+    moment, operator, result = _solve_prorm_dual(
         batch,
         margins,
         effective_config,
@@ -614,7 +621,7 @@ def evaluate_srm_plus(
         operator.matvec(direction),
         beta=effective_config.beta,
     )
-    return SRMEvaluation(
+    return ProRMPlusEvaluation(
         moment=moment.detach().clone(),
         direction=direction.clone(),
         dual_loss=float(loss.item()),
@@ -708,8 +715,8 @@ class BTMLETrainer:
         """Return a detached in-memory checkpoint; this method performs no I/O."""
 
         return {
-            "format_version": 1,
-            "trainer": "bt_mle",
+            "format_version": CHECKPOINT_FORMAT_V2,
+            "trainer": BT_MLE,
             "config": asdict(self.config),
             "model": copy.deepcopy(self.model.state_dict()),
             "optimizer": copy.deepcopy(self.optimizer.state_dict()),
@@ -720,7 +727,7 @@ class BTMLETrainer:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         """Restore a checkpoint produced by :meth:`state_dict`."""
 
-        common = _validate_checkpoint(state, "bt_mle", asdict(self.config))
+        common = _validate_checkpoint(state, BT_MLE, asdict(self.config))
         self.model.load_state_dict(common["model"], strict=True)
         self.optimizer.load_state_dict(common["optimizer"])
         _validate_optimizer(self.optimizer, self.model)
@@ -729,20 +736,20 @@ class BTMLETrainer:
         _validate_model_batch(self.model, self.batch)
 
 
-class SRMPlusTrainer:
-    """Stateful one-dual-solve/one-update trainer for SRM+."""
+class ProRMPlusTrainer:
+    """Stateful one-dual-solve/one-update trainer for ProRM+."""
 
     def __init__(
         self,
         model: FrozenFeatureLinearReward,
         batch: FeatureTrainingBatch,
-        config: SRMPlusTrainingConfig | None = None,
+        config: ProRMPlusTrainingConfig | None = None,
         *,
         optimizer: torch.optim.Optimizer | None = None,
     ) -> None:
-        effective_config = SRMPlusTrainingConfig() if config is None else config
-        if not isinstance(effective_config, SRMPlusTrainingConfig):
-            raise TypeError("config must be an SRMPlusTrainingConfig")
+        effective_config = ProRMPlusTrainingConfig() if config is None else config
+        if not isinstance(effective_config, ProRMPlusTrainingConfig):
+            raise TypeError("config must be a ProRMPlusTrainingConfig")
         _validate_model_batch(model, batch)
         self.model = model
         self.batch = batch
@@ -764,7 +771,7 @@ class SRMPlusTrainer:
 
         # This no-grad pass is intentionally complete before any outer graph is built.
         margins = _full_margins(self.model, self.batch, self.config.microbatch_size)
-        moment, operator, result = _solve_srm_dual(
+        moment, operator, result = _solve_prorm_dual(
             self.batch,
             margins,
             self.config,
@@ -829,11 +836,11 @@ class SRMPlusTrainer:
         count = _nonnegative_integer("num_steps", num_steps)
         return tuple(self.step() for _ in range(count))
 
-    def evaluate(self, *, use_warm_start: bool = True) -> SRMEvaluation:
-        """Evaluate current full-data SRM+ loss without changing trainer state."""
+    def evaluate(self, *, use_warm_start: bool = True) -> ProRMPlusEvaluation:
+        """Evaluate current full-data ProRM+ loss without changing trainer state."""
 
         warm_start = self.dual_direction if use_warm_start else None
-        return evaluate_srm_plus(
+        return evaluate_prorm_plus(
             self.model,
             self.batch,
             self.config,
@@ -844,8 +851,8 @@ class SRMPlusTrainer:
         """Return a deterministic detached checkpoint dictionary without I/O."""
 
         return {
-            "format_version": 1,
-            "trainer": "srm_plus",
+            "format_version": CHECKPOINT_FORMAT_V2,
+            "trainer": PRORM_PLUS,
             "config": asdict(self.config),
             "model": copy.deepcopy(self.model.state_dict()),
             "optimizer": copy.deepcopy(self.optimizer.state_dict()),
@@ -860,7 +867,12 @@ class SRMPlusTrainer:
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
         """Restore a checkpoint produced by :meth:`state_dict`."""
 
-        common = _validate_checkpoint(state, "srm_plus", asdict(self.config))
+        common = _validate_checkpoint(
+            state,
+            PRORM_PLUS,
+            asdict(self.config),
+            legacy_trainer=LEGACY_SRM_PLUS,
+        )
         required = {"dual_refreshes", "dual_direction"}
         missing = required.difference(state)
         if missing:
@@ -871,7 +883,7 @@ class SRMPlusTrainer:
         direction = state["dual_direction"]
         if direction is None:
             if refreshes != 0:
-                raise ValueError("a trained SRM+ checkpoint must contain dual_direction")
+                raise ValueError("a trained ProRM+ checkpoint must contain dual_direction")
             restored_direction = None
         else:
             if not isinstance(direction, torch.Tensor):
@@ -901,6 +913,8 @@ def _validate_checkpoint(
     state: Mapping[str, Any],
     expected_trainer: str,
     expected_config: dict[str, Any],
+    *,
+    legacy_trainer: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(state, Mapping):
         raise TypeError("state must be a mapping")
@@ -916,10 +930,16 @@ def _validate_checkpoint(
     missing = required.difference(state)
     if missing:
         raise ValueError(f"checkpoint is missing keys: {sorted(missing)}")
-    if state["format_version"] != 1:
+    format_version = state["format_version"]
+    if format_version not in {CHECKPOINT_FORMAT_V1, CHECKPOINT_FORMAT_V2}:
         raise ValueError("unsupported checkpoint format_version")
-    if state["trainer"] != expected_trainer:
-        raise ValueError(f"checkpoint trainer must be {expected_trainer!r}")
+    serialized_trainer = (
+        legacy_trainer
+        if format_version == CHECKPOINT_FORMAT_V1 and legacy_trainer is not None
+        else expected_trainer
+    )
+    if state["trainer"] != serialized_trainer:
+        raise ValueError(f"checkpoint trainer must be {serialized_trainer!r}")
     if state["config"] != expected_config:
         raise ValueError("checkpoint config does not match the trainer config")
     completed_steps = _nonnegative_integer("completed_steps", state["completed_steps"])
@@ -958,17 +978,26 @@ def train_bt_mle(
     return trainer
 
 
-def train_srm_plus(
+def train_prorm_plus(
     model: FrozenFeatureLinearReward,
     batch: FeatureTrainingBatch,
     num_steps: int,
-    config: SRMPlusTrainingConfig | None = None,
-) -> SRMPlusTrainer:
-    """Construct, run, and return an SRM+ trainer."""
+    config: ProRMPlusTrainingConfig | None = None,
+) -> ProRMPlusTrainer:
+    """Construct, run, and return a ProRM+ trainer."""
 
-    trainer = SRMPlusTrainer(model, batch, config)
+    trainer = ProRMPlusTrainer(model, batch, config)
     trainer.fit(num_steps)
     return trainer
+
+
+# Public compatibility aliases.  Canonical names above are used by all new
+# code and serialized output; these assignments keep pre-ProRM imports valid.
+SRMPlusTrainingConfig = ProRMPlusTrainingConfig
+SRMEvaluation = ProRMPlusEvaluation
+SRMPlusTrainer = ProRMPlusTrainer
+evaluate_srm_plus = evaluate_prorm_plus
+train_srm_plus = train_prorm_plus
 
 
 __all__ = [
@@ -976,12 +1005,17 @@ __all__ = [
     "BTMLETrainingConfig",
     "FeatureTrainingBatch",
     "FrozenFeatureLinearReward",
+    "ProRMPlusEvaluation",
+    "ProRMPlusTrainer",
+    "ProRMPlusTrainingConfig",
     "SRMEvaluation",
     "SRMPlusTrainer",
     "SRMPlusTrainingConfig",
     "TrainingStepDiagnostics",
     "evaluate_bt_mle",
+    "evaluate_prorm_plus",
     "evaluate_srm_plus",
     "train_bt_mle",
+    "train_prorm_plus",
     "train_srm_plus",
 ]

@@ -113,7 +113,28 @@ def test_comparison_parser_selects_only_unique_main_run_and_checks_identity() ->
         expected_artifact_metadata_sha256="d" * 64,
         expected_dimension=1,
     )
-    assert heads == {"bt_mle": (0.8,), "srm_plus": (1.2,)}
+    assert heads == {"bt_mle": (0.8,), "prorm_plus": (1.2,)}
+
+
+def test_comparison_parser_accepts_canonical_v2_learner_keys() -> None:
+    digest = "a" * 64
+    value = _comparison(digest, 17)
+    value["schema_version"] = "controlled-comparison/v2"
+    for run in value["damping_runs"]:
+        result = run["result"]
+        legacy = result.pop("srm_plus")
+        legacy["method"] = "prorm_plus"
+        result["prorm_plus"] = legacy
+
+    heads = stage.parse_comparison_heads(
+        value,
+        expected_config_hash=digest,
+        expected_seed=17,
+        expected_artifact_metadata_sha256="d" * 64,
+        expected_dimension=1,
+    )
+
+    assert heads == {"bt_mle": (0.8,), "prorm_plus": (1.2,)}
 
     duplicate = json.loads(json.dumps(value))
     duplicate["damping_runs"].append(duplicate["damping_runs"][1])
@@ -211,15 +232,15 @@ def test_rollout_result_uses_one_shared_reference_mean() -> None:
         artifact_test_rewards=torch.tensor([-0.5, 0.5, -0.5, 0.5]),
         learner_direction_evidence={
             "bt_mle": _direction_evidence(),
-            "srm_plus": _direction_evidence(),
+            "prorm_plus": _direction_evidence(),
         },
         learner_update_evidence={
             "bt_mle": _update_evidence(),
-            "srm_plus": _update_evidence(),
+            "prorm_plus": _update_evidence(),
         },
         learner_transformed_rewards={
             "bt_mle": [0.0, 2.0, 2.0, 4.0],
-            "srm_plus": [1.0, 1.0, 3.0, 3.0],
+            "prorm_plus": [1.0, 1.0, 3.0, 3.0],
         },
         rollout_seed=7,
         num_test_prompts=2,
@@ -234,10 +255,10 @@ def test_rollout_result_uses_one_shared_reference_mean() -> None:
     assert result["learners"]["bt_mle"]["paired_improvement_over_zero_b_reference"][
         "sample_standard_error"
     ] == pytest.approx(1.0)
-    assert result["learners"]["srm_plus"]["paired_improvement_over_zero_b_reference"][
+    assert result["learners"]["prorm_plus"]["paired_improvement_over_zero_b_reference"][
         "mean_difference"
     ] == pytest.approx(2.0)
-    assert result["learners"]["srm_plus"]["paired_improvement_over_zero_b_reference"][
+    assert result["learners"]["prorm_plus"]["paired_improvement_over_zero_b_reference"][
         "sample_standard_error"
     ] == pytest.approx(1.0)
     assert result["artifact_metadata_sha256"] == "d" * 64
@@ -477,12 +498,13 @@ def test_fake_loader_end_to_end_writes_no_raw_oracle(
         output_json=output,
         device="cpu",
     )
-    assert payload["schema_version"] == "matched-kl-rollout/v1"
+    assert payload["schema_version"] == "matched-kl-rollout/v2"
     assert output.exists()
     rollout_path = tmp_path / "updated_rollouts.jsonl"
     rows = [json.loads(line) for line in rollout_path.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 24
-    assert {row["policy"] for row in rows} == {"reference", "bt_mle", "srm_plus"}
+    assert {row["schema_version"] for row in rows} == {"updated-rollout/v2"}
+    assert {row["policy"] for row in rows} == {"reference", "bt_mle", "prorm_plus"}
     assert {row["policy_source"] for row in rows} == {
         "zero_b_reference",
         "matched_kl_update",

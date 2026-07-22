@@ -1,538 +1,803 @@
-# SRM+ 理论规格：从局部 policy regret 到 Fisher-GMM
+# ProRM/ProRM+ 理论规格：从全局 policy utility 到可训练 Fisher–GMM
 
-本文档是仓库的数学源规范。符号、常数因子、估计对象以及“精确等价”和“工程近似”的
-边界均以此处为准；实验设计见 [experiment_protocol.md](experiment_protocol.md)。
+论文标题固定为：
 
-## 0. 一页阅读指南
+> **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
 
-SRM+ 的出发点不是“怎样更准确地预测人类偏好”，而是：
+本文档是仓库的数学源规范。它固定 ProRM 与 ProRM+ 的含义、全部常数因子、population
+identity、有限样本正则化以及工程近似的边界。实验设计见
+[experiment_protocol.md](experiment_protocol.md)，三边四响应解析构造见
+[closed_form_example.md](closed_form_example.md)。
 
-> 当 reward model 只用于产生下一次局部 policy update 时，应该只惩罚那些会改变该
-> update 的 reward error。
+## 0. 名称与结论层级
 
-推导分成四步：
+Prospective Reward Modeling 的出发点是：
 
-1. 局部二阶 KL 几何把 downstream regret 写成一个 Fisher 逆范数；
-2. score identity 把不可观测的 reward moment 改写成 pairwise moment；
-3. randomized repeated labels 为 BTL logit margin 提供逐 edge 无偏估计 `h`；
-4. 有限样本中用 ridge Fisher 和 PCG 得到可训练的 Fisher-GMM 目标。
+> Reward model 应按它将诱导的未来 policy optimization 来训练，而不应只按它解释过去
+> preference labels 的能力来训练。
 
-下表先固定最常用的符号。除非特别说明，期望均包含
+两个名称严格对应两个数学层级：
+
+| 名称 | 固定含义 |
+|---|---|
+| **ProRM** | 含不可观测目标 reward 的理想 population/local downstream-regret loss |
+| **ProRM+** | 用 repeated labels 识别该目标 moment，并以 Fisher–GMM dual、ridge 与 PCG 实现的可训练方法 |
+
+“+”表示从不可观测理想 target 到可训练 moment method 的识别与优化闭环。ProRM 不是一个
+单独实现的 baseline。正式训练对照始终是 repeated-label BT-MLE 与 ProRM+。
+
+整条推导是：
+
+```text
+global downstream utility
+  -> local quadratic policy problem
+  -> ideal ProRM regret in Fisher geometry
+  -> natural-pair moment identity
+  -> repeated-label unbiased margin h
+  -> observable ProRM+ Fisher-GMM dual
+  -> damped empirical objective + PCG
+  -> held-out geometry + matched measured-KL rollout
+```
+
+最常用符号如下。除非另行说明，node expectation 包含
 `x ~ rho, y ~ pi_0(.|x)`。
 
 | 符号 | 含义 |
 |---|---|
-| `rho` | 固定 prompt 分布 |
-| `pi_0=pi_{theta_0}` | 产生 candidate 的 reference policy |
-| `theta` | 下一步真实允许更新的 policy tangent 坐标 |
-| `s_0(x,y)` | `nabla_theta log pi_theta(y|x)` 在 `theta_0` 的 score |
-| `F_0` | reference policy 在上述坐标中的 Fisher |
-| `r*`, `r_phi` | 目标/oracle reward 与待训练 reward model |
-| `g_r` | reward 对局部 policy update 的一阶驱动力 |
-| `z`, `t`, `h` | pair score difference、预测 margin、真实 margin 的无偏估计 |
-| `beta` | KL regularization 系数 |
+| `rho` | 固定的目标 prompt 分布 |
+| `pi_0=pi_{theta_0}` | 生成候选并定义局部几何的 reference policy |
+| `theta` | 下一次 policy optimization 真正允许改变的 tangent 坐标 |
+| `s_0(x,y)` | `nabla_theta log pi_theta(y|x)` 在 `theta_0` 的 sequence score |
+| `A_0 r` | reward 对局部 policy update 的一阶 moment |
+| `F_0` | reference policy 在同一 tangent 坐标中的 Fisher |
+| `r*`, `r_phi` | 目标/operational-oracle reward 与学习到的 reward model |
+| `Q_0` | natural pair law `rho*pi_0*pi_0` |
+| `z_0`, `Delta r_phi`, `h` | pair score difference、预测 margin、真实 margin 的无偏估计 |
+| `m_phi` | `A_0(r_phi-r*)` 的可观测 repeated-label moment 表达 |
+| `beta` | downstream KL regularization 系数，严格为正 |
+| `lambda` | finite-sample Fisher ridge，严格为正 |
 
-## 1. 局部决策问题
+## 1. 全局 Prospective Reward Modeling 问题
 
-### 1.1 Reward 如何产生一次局部更新
+### 1.1 先定义未来 policy utility
 
-定义
-
-$$
-s_0(x,y)=\nabla_\theta\log\pi_\theta(y\mid x)|_{\theta_0},\qquad
-F_0=\mathbb E[s_0s_0^\top],\qquad
-g_r=\mathbb E[s_0r(x,y)].
-$$
-
-在 `theta_0` 附近，对 KL-regularized policy objective 做二阶展开，reward `r` 所对应的
-局部问题是
+给定 reward `r`，下游 KL-regularized policy optimization 定义为
 
 $$
-J_r(\delta)=g_r^\top\delta-\frac{\beta}{2}\delta^\top F_0\delta.
+J(\theta;r)
+=\mathbb E_{x\sim\rho,y\sim\pi_\theta(\cdot|x)}[r(x,y)]
+-\beta\mathbb E_{x\sim\rho}
+D_{\mathrm{KL}}\!\left(
+\pi_\theta(\cdot|x)\,\Vert\,\pi_0(\cdot|x)
+\right),
+\qquad \beta>0.
 $$
 
-在 identifiable tangent space 上取最小范数解：
+令
 
 $$
-\delta_r=\arg\max_\delta J_r(\delta)
-=\beta^{-1}F_0^\dagger g_r.
+\theta_r\in\arg\max_\theta J(\theta;r)
 $$
 
-这里的坐标必须和真实下游 update 完全相同。若实验只允许更新 fixed-A LoRA-B，那么
-`s_0`、`F_0` 和最终施加的 update 都必须使用同一组 LoRA-B 坐标。
-
-### 1.2 用目标 objective 评价 learned-reward update
-
-目标 reward `r*` 的局部 objective 记为
+表示把 `r` 交给下游 optimizer 后得到的 policy。reward model 的真实价值不能由它自己的
+训练 loss 定义，而应由该 policy 在目标 reward `r*` 下的效用定义：
 
 $$
-G^*(\delta)=g_*^\top\delta-\frac{\beta}{2}\delta^\top F_0\delta,
-\qquad
-\delta^*=\beta^{-1}F_0^\dagger g_*.
+U(r)=J(\theta_r;r^*).
 $$
 
-reward model 的错误不是 `r_phi-r*` 的逐点误差，而是它产生的 update `delta_phi` 在
-真实 objective 上损失多少：
-
-$$
-\widetilde{\operatorname{Reg}}(r_\phi)
-=G^*(\delta^*)-G^*(\delta_\phi).
-$$
-
-对二次函数配方，并使用
-`delta_phi-delta*=beta^{-1}F_0^dagger(g_phi-g*)`，得到
-
-$$
-G^*(\delta^*)-G^*(\delta_\phi)
-=\frac{\beta}{2}(\delta_\phi-\delta^*)^\top
-F_0(\delta_\phi-\delta^*),
-$$
+因此全局 prospective regret 是
 
 $$
 \boxed{
-\widetilde{\operatorname{Reg}}(r_\phi)
-=\frac1{2\beta}(g_{r_\phi}-g_*)^\top
-F_0^\dagger(g_{r_\phi}-g_*)
+\operatorname{Reg}_{G}(r)
+=J(\theta_{r^*};r^*)-J(\theta_r;r^*)
 }.
 $$
 
-这是 population、未阻尼、局部二阶问题中的精确等式。
+理想问题是 `min_{r in R} Reg_G(r)`。这个定义回答“哪个 reward 会诱导更正确的 policy”，
+而 BT-MLE likelihood 回答“哪个 reward 更能解释 preference observations”。当 reward class
+misspecified 时，两者没有理由选择同一个近似。
 
-### 1.3 几何直觉：只看 policy 可见的 reward error
+### 1.2 为什么不能直接训练全局目标
 
-在有限离散表示中，令 `A_theta` 的列为各 `(x,y)` 的 score，
-`D_0=diag(rho*pi_0)`，并定义 `B=A_theta D_0^(1/2)`。则
+全局定义有两个不可直接实施的部分：
+
+1. `theta_r` 是完整 policy optimization 的解映射，reward learning 与 policy learning 形成
+   双层问题；
+2. 评价需要目标 reward `r*`，训练时却只观察随机 pairwise preferences。
+
+因此 `Reg_G` 是正确的效用定义，不是本项目直接反向传播的 loss。ProRM 通过局部 Taylor
+近似解决第一个障碍；ProRM+ 再通过 repeated-label identification 解决第二个障碍。
+
+### 1.3 研究所针对的维度错配
+
+有限离散化后，把完整 reward 写成 `r in R^m`，reference policy 的可更新 tangent 维数为
+`d`，受限 reward class 的有效维数为 `p`。目标设定是
 
 $$
-F_0=BB^\top,
+m\gg d\gg p.
 $$
 
-且上面的 regret 等于
+第一层压缩来自 policy：大量 reward directions 不改变当前 tangent 中的 update。第二层压缩
+来自 reward class：只能在受限函数类中选择代表。这个关系是方法动机，不是实验证明；Phase 1
+是否在有限 train candidates 上表现出线性不可表示性，必须由 projection diagnostic 报告。
+
+## 2. 局部二次问题与理想 ProRM loss
+
+### 2.1 Score、reward moment 与 Fisher
+
+定义 reference-policy sequence score
 
 $$
-\frac1{2\beta}\left\|
-P_{\operatorname{row}(B)}D_0^{1/2}(r_\phi-r^*)
-\right\|_2^2.
+s_0(x,y)
+=\nabla_\theta\log\pi_\theta(y\mid x)|_{\theta_0}\in\mathbb R^d,
+$$
+
+reward moment operator
+
+$$
+A_0r
+:=\mathbb E_{x\sim\rho,y\sim\pi_0}[s_0(x,y)r(x,y)],
+$$
+
+以及 Fisher
+
+$$
+F_0
+:=\mathbb E_{x\sim\rho,y\sim\pi_0}
+[s_0(x,y)s_0(x,y)^\top].
+$$
+
+这些对象必须使用下游实际更新的同一坐标。Phase 1 只更新 fixed-A LoRA-B，所以候选 score、
+Fisher、natural direction 与实际写回 policy 的 displacement 全部使用同一 LoRA-B layout、
+scale、shape 与 hash。
+
+### 2.2 Local policy optimization
+
+令 `delta=theta-theta_0`。在 reference policy 附近，对期望 reward 作一阶展开、对 forward KL
+作二阶展开：
+
+$$
+J(\theta_0+\delta;r)
+\approx
+C(r)+\delta^\top A_0r
+-\frac\beta2\delta^\top F_0\delta.
+$$
+
+记 `g_r=A_0r`。在 identifiable tangent space 上取最小范数解：
+
+$$
+\delta_r
+=\beta^{-1}F_0^\dagger g_r.
+$$
+
+若 `a` 位于 `Null(F_0)`，则 `a^T s_0=0` 几乎处处。只要 reward 二阶可积，`a^Tg_r=0`，
+所以 `g_r` 位于 `Range(F_0)`，伪逆表达良定义。
+
+### 2.3 ProRM 的精确局部 regret
+
+用目标 reward 的局部 objective
+
+$$
+G^*(\delta)=g_*^\top\delta-\frac\beta2\delta^\top F_0\delta
+$$
+
+评价 learned reward 诱导的 `delta_phi`。理想 ProRM loss 定义为
+
+$$
+\mathcal L_{\mathrm{ProRM}}(\phi)
+:=G^*(\delta^*)-G^*(\delta_\phi).
+$$
+
+对二次函数配方：
+
+$$
+G^*(\delta^*)-G^*(\delta_\phi)
+=\frac\beta2(\delta_\phi-\delta^*)^\top
+F_0(\delta_\phi-\delta^*).
+$$
+
+再使用
+`delta_phi-delta*=beta^{-1}F_0^dagger(A_0r_phi-A_0r*)`，得到
+
+$$
+\boxed{
+\mathcal L_{\mathrm{ProRM}}(\phi)
+=\frac1{2\beta}
+\left\|A_0(r_\phi-r^*)\right\|_{F_0^\dagger}^{2}
+=\frac1{2\beta}
+(g_{r_\phi}-g_*)^\top F_0^\dagger(g_{r_\phi}-g_*)
+}.
+$$
+
+这里 `||u||^2_{F_0^dagger}:=u^T F_0^dagger u`。这是 population、无阻尼、局部二阶问题中的
+精确 identity；它不是任意大 policy update 的全局保证。
+
+### 2.4 Projection geometry 与 reward 等价类
+
+在有限表示中，令 `A_theta` 的列为每个 `(x,y)` 的 score，
+`D_0=diag(rho(x)pi_0(y|x))`，`B_0=A_theta D_0^(1/2)`。则
+
+$$
+F_0=B_0B_0^\top,
+$$
+
+且
+
+$$
+\boxed{
+\mathcal L_{\mathrm{ProRM}}(\phi)
+=\frac1{2\beta}
+\left\|
+P_{\operatorname{row}(B_0)}
+D_0^{1/2}(r_\phi-r^*)
+\right\|_2^2
+}.
 $$
 
 因此：
 
-- prompt 内加常数不会改变 update；
-- 落在 score 零空间中的 reward error 不会被惩罚；
-- 两个 pointwise fit 同样好的 reward model，可能产生完全不同的 policy update；
-- 在 reward class misspecified 时，BT likelihood 最优不保证等于 policy regret 最优，通常不同。
+- prompt 内统一加常数不会改变 update；
+- 位于 score 零空间的 reward error 不会被惩罚；
+- pointwise MSE、BT-MLE NLL 与 policy regret 是不同几何中的投影；
+- 在 misspecified reward class 中，BT-MLE optimum 不保证等于 ProRM optimum；
+- 若 `A_0r_1=A_0r_2`，两个 rewards 在当前局部 policy problem 中属于同一等价类。
 
-这正是 SRM+ 与普通 preference prediction 目标的根本区别。
+三边四响应 [closed-form example](closed_form_example.md) 给出 BT-MLE 与 population ProRM 的解析排序
+反转。它只证明理想 population objectives 可以选出不同 reward；它不使用 randomized `h`，
+因此不能单独证明 ProRM+ identification。后者必须在 natural `Q_0` 下由下一节的 identity 建立。
 
-一个最小例子可以直接看出差别。设一个 prompt 有三个等概率 candidates，唯一 policy
-score 坐标为 `s=(-1,0,1)`，reward error 为 `e=(1,-2,1)`。逐点 MSE 明显非零，但
-`E[s*e]=0`，所以该 error 在当前 tangent 下不改变 policy update，local regret 为零。
-SRM+ 忽略它不是“少学了信息”，而是没有为当前决策支付无用的拟合成本。
+## 3. Natural-pair representation
 
-## 2. 从 node reward moment 到 pairwise observation
+### 3.1 固定 pair law 与方向
 
-对同一 prompt 条件独立采样 `y,y' ~ pi_0(.|x)`，定义
-
-$$
-z=s_0(x,y)-s_0(x,y'),\qquad
-t_r=r(x,y)-r(x,y').
-$$
-
-方向约定始终是 `left - right`：`a=1` 表示 left/`y` 胜出；交换 edge 时必须同时翻转
-`z,t,h` 并把 `left_wins` 映射为 `N-left_wins`。
-
-score identity 给出 `E[s_0|x]=0`。展开 pair moment：
+不引入人为 edge reweighting。定义
 
 $$
-\begin{aligned}
-\mathbb E[zt_r\mid x]
-&=\mathbb E[(s-s')(r-r')\mid x]\\
-&=2\,\mathbb E[sr\mid x],
-\end{aligned}
+Q_0(dx,dy,dy')
+=\rho(dx)\pi_0(dy\mid x)\pi_0(dy'\mid x).
 $$
 
-交叉项因为 `y,y'` 条件独立且 `E[s|x]=0` 消失。因此
+给定 `e=(x,y,y')`，定义
 
 $$
-\boxed{g_r=\frac12\mathbb E[zt_r]}.
+z_0(e)=s_0(x,y)-s_0(x,y'),
+\qquad
+t_r(e)=\Delta r(e)=r(x,y)-r(x,y').
+$$
+
+方向始终为 `left-right`：`a=1` 表示 left/`y` 获胜。交换 edge 时必须同时翻转 `z_0`、
+`Delta r`、`h`，并把 `left_wins` 变为 `N-left_wins`。
+
+### 3.2 两个精确 pair identities
+
+Score identity 给出
+
+$$
+\mathbb E_{y\sim\pi_0(\cdot|x)}[s_0(x,y)\mid x]=0.
+$$
+
+因为 `y,y'` 条件独立，展开可得
+
+$$
+\mathbb E[z_0t_r\mid x]
+=2\mathbb E[s_0r\mid x],
+$$
+
+所以
+
+$$
+\boxed{A_0r=\frac12\mathbb E_{e\sim Q_0}[z_0(e)t_r(e)]}.
 $$
 
 同理，
 
 $$
-\boxed{F_0=\frac12\mathbb E[zz^\top]}.
+\boxed{F_0=\frac12\mathbb E_{e\sim Q_0}[z_0(e)z_0(e)^\top]}.
 $$
 
-两个等式在 population 中等价，但工程估计器不必使用同一种表示：
+Population 中 node 与 pair 表示相同。工程上固定为：
 
-- Fisher 用每个 prompt 的全部 on-policy node score 估计，方差更低；
-- reward error moment 用被标注 edge 的 score difference 估计；
-- 不能用主动选择 edge 的 endpoint 频率替代原 on-policy node Fisher。
+- 全部 on-policy candidate nodes 估计 Fisher，降低方差；
+- canonical labeled edge 估计 reward-error moment；
+- 不用 edge endpoint 频率替代原 on-policy node Fisher；
+- 两个 finite-sample estimators 不要求数值相等。
 
-Phase 1 中，`P` 个 train prompts、每 prompt `M=4` 个 candidates、policy tangent 维数 `d`、
-reward feature 维数 `H` 对应：
+Phase 1 中，`P` 个 prompts、每 prompt `M=4` 个 candidates、policy dimension `d`、reward
+feature dimension `H` 对应：
 
 ```text
-S:          (P*M, d)   # 全部 on-policy nodes，可与 edge endpoints 重叠
-Z:          (P, d)     # 每 prompt canonical candidate 0 - 1
+S:          (P*M, d)   # all on-policy nodes
+Z:          (P, d)     # canonical candidate 0 - candidate 1
 left/right: (P, H)     # frozen reward features
-t, h:       (P,)
+Delta r,h:  (P,)
 F_hat = S.T @ S / (P*M)
-m_hat = Z.T @ (t-h) / (2*P)
+m_hat = Z.T @ (Delta r-h) / (2*P)
 ```
 
-node Fisher 与 pair moment 估计同一 population 几何，但有限样本数值不要求彼此相等。
+## 4. Repeated labels identify the target margin
 
-## 3. 为什么单个 Bernoulli label 不够
+### 4.1 单标签不可能逐 edge 无偏恢复 logit
 
-### 3.1 单标签不可能逐 edge 无偏恢复 logit
-
-在单位温度 BTL 模型下（等价地，温度已吸收到 reward 尺度），给定 edge `e`：
+单位温度 BTL 模型为
 
 $$
-a\mid e\sim\operatorname{Bernoulli}(p^*(e)),\qquad
-p^*(e)=\sigma(t^*(e)),\qquad t^*(e)=\Delta r^*(e).
+a\mid e\sim\operatorname{Bernoulli}(p^*(e)),
+\qquad
+p^*(e)=\sigma(\Delta r^*(e)).
 $$
 
-对单标签任意统计量 `H(a)`，
+对仅依赖一个 Bernoulli label 的任意统计量 `H(a)`，
 
 $$
-\mathbb E[H(a)\mid e]=(1-p^*)H(0)+p^*H(1),
+\mathbb E[H(a)\mid e]
+=(1-p^*)H(0)+p^*H(1),
 $$
 
-它关于 `p*` 必为仿射函数，不可能在一个区间上等于非线性的 `logit(p*)`。所以，在
-“逐 edge、distribution-free、不跨 edge 拟合条件概率”的限定下，单标签不能给出精确
-SRM+ target。这个结论不否定参数化概率模型或跨样本平滑，但那会引入另一层模型误差。
+它关于 `p*` 必为仿射函数，不可能在区间上等于非线性的 `logit(p*)`。这个命题只排除
+“逐 edge、distribution-free、单标签”的无偏 target；它不否定跨 edge 参数共享的 MLE。
 
-### 3.2 Logit 级数与 randomized truncation
+### 4.2 Randomized U-statistic
 
-对 `p in (0,1)`，
+利用级数
 
 $$
 \operatorname{logit}(p)
 =\sum_{k=1}^{\infty}\frac{p^k-(1-p)^k}{k}.
 $$
 
-对同一 edge 获取条件 iid labels `a_1,...,a_N`。记 `S_N=sum_j a_j`，并定义
+对同一 edge 获取条件 iid labels `a_1,...,a_N`。记 `S_N=sum_j a_j`，定义
 
 $$
-U^+_{k,N}=\frac{\binom{S_N}{k}}{\binom Nk},\qquad
+U^+_{k,N}=\frac{\binom{S_N}{k}}{\binom Nk},
+\qquad
 U^-_{k,N}=\frac{\binom{N-S_N}{k}}{\binom Nk}.
 $$
 
-条件于 `N>=k`，两个 U-statistic 的期望分别是 `p^k` 与 `(1-p)^k`。令随机重复数 `N`
-独立于 edge 和 labels，生存概率为 `q_k=P(N>=k)>0`，则 Russian-roulette 估计量
+令 `N` 独立于 edge 与 labels，生存概率 `q_k=P(N>=k)>0`。定义
 
 $$
-h=\sum_{k=1}^{N}\frac{U^+_{k,N}-U^-_{k,N}}{kq_k}
+h
+=\sum_{k=1}^{N}
+\frac{U^+_{k,N}-U^-_{k,N}}{kq_k}.
 $$
 
-满足
+条件于 `N>=k`，两个 U-statistics 分别无偏估计 `p^k` 与 `(1-p)^k`；`1/q_k` 校正第
+`k` 项被计算的生存概率。因此
 
 $$
-\boxed{\mathbb E[h\mid e]=\operatorname{logit}(p^*(e))=t^*(e)}.
+\boxed{
+\mathbb E[h\mid e]
+=\operatorname{logit}(p^*(e))
+=\Delta r^*(e)
+}.
 $$
 
-关键的 survival correction 是
+实现只使用 `(S_N,N)` 的组合计数，不枚举 label 子集。
 
-$$
-\mathbb E\!\left[
-\frac{\mathbf 1\{N\ge k\}}{q_k}U^+_{k,N}\mid e
-\right]=p^{*k},
-$$
-
-负项同理。`1/q_k` 抵消第 `k` 项只有在 `N>=k` 时才被计算的概率；U-statistic 则用同一批
-labels 无偏估计幂。实现只需要 `(S_N,N)` 的组合计数，不需要枚举 label 子集。
+### 4.3 主实验的随机截断常数
 
 主实验固定
 
 $$
-P(N=n)=(1-\gamma)\gamma^{n-1},\qquad
-q_k=\gamma^{k-1},\qquad \gamma=0.9.
+P(N=n)=(1-\gamma)\gamma^{n-1},
+\qquad
+q_k=\gamma^{k-1},
+\qquad
+\gamma=0.9.
 $$
 
-此时 `E[N]=10`。本实现要求
-`gamma > max(p*,1-p*)`：oracle transform 保证 `p* in [0.25,0.75]`，所以主实验满足
-`0.9>0.75`。这为级数项保留足够的 survival tail，并满足本实验使用的有限二阶矩条件。
-不得硬截断、clip 或因
-`N` 较大而重采样；这些操作都会改变原估计量并引入偏差，guard 只能使 run 失败。
+因此 `E[N]=1/(1-gamma)=10`。oracle transform 保证
+`p* in [0.25,0.75]`，并且 `gamma > max(p*,1-p*)`，即 `0.9>0.75`；这满足本实验采用的
+有限二阶矩充分条件。
 
-### 3.3 权重语义
+不得硬截断、clip 大 `N`、按 `N` 重采样或静默丢弃。memory guard 只能使 run fail closed，
+不能改变 estimator。
 
-随机 `N` 只决定 `h` 的构造成本，不改变 edge 分布：
+随机 `N` 只决定构造 `h` 的成本：
 
-- SRM+ 中每条 edge 对 moment 恰好贡献一次；
-- 不得再按 `N` 给 SRM+ edge 加权；
-- BT-MLE baseline 使用全部原始 Bernoulli labels，因此等价于按 `N` 累计 likelihood。
+- ProRM+ 中每个 edge 对 moment 恰好贡献一次；
+- 不得按 `N` 再给 ProRM+ edge 加权；
+- BT-MLE 使用全部原始 Bernoulli labels，等价于按 `N` 累计 likelihood。
 
-## 4. Fisher-GMM 目标
+### 4.4 固定重复数只能得到截断 target
 
-定义预测 margin `t_phi=r_phi(x,y)-r_phi(x,y')` 和 moment
+若每个 edge 固定收集 `L` 个 labels，`S=sum_j a_j`，则
 
 $$
-m_\phi=\frac12\mathbb E[z(t_\phi-h)].
+h_L
+=\sum_{k=1}^{L}\frac1k
+\left[
+\frac{\binom Sk}{\binom Lk}
+-\frac{\binom{L-S}k}{\binom Lk}
+\right].
 $$
 
-利用 `E[h|e]=t*(e)` 与第 2 节的 pair identity：
+其期望只等于 logit 级数的前 `L` 项。若 `p* in [epsilon,1-epsilon]`，
+
+$$
+\left|
+\mathbb E[h_L\mid e]-\Delta r^*(e)
+\right|
+\le
+\frac{2(1-\epsilon)^{L+1}}{\epsilon(L+1)}.
+$$
+
+所以固定 `L` 的人类数据实验必须称为 **candidate-restricted truncated ProRM+ robustness**，
+不能援引精确无偏 identity。
+
+## 5. Observable ProRM+ Fisher–GMM objective
+
+### 5.1 Moment identification
+
+定义预测 margin `Delta r_phi(e)` 以及
 
 $$
 m_\phi
-=\frac12\mathbb E[z(t_\phi-t^*)]
-=g_{r_\phi}-g_*.
+:=\frac12\mathbb E_{e,h}
+[z_0(e)(\Delta r_\phi(e)-h(e))].
 $$
 
-于是 population SRM+ loss 与 local regret 精确相同：
+利用 repeated-label identity 与 natural-pair identity：
+
+$$
+\begin{aligned}
+m_\phi
+&=\frac12\mathbb E_{Q_0}
+[z_0(\Delta r_\phi-\Delta r^*)]\\
+&=A_0(r_\phi-r^*).
+\end{aligned}
+$$
+
+因此既不需要恢复完整 `r*`，也不需要分别估计 `A_0r_phi` 与 `A_0r*`；直接估计二者之差。
+
+### 5.2 Population equivalence theorem
+
+ProRM loss 可写为
+
+$$
+\mathcal L_{\mathrm{ProRM}}(\phi)
+=\frac1{2\beta}m_\phi^\top F_0^\dagger m_\phi.
+$$
+
+对 `m in Range(F_0)`，Fenchel identity 为
+
+$$
+\frac12m^\top F_0^\dagger m
+=\max_v\left(v^\top m-\frac12v^\top F_0v\right).
+$$
+
+所以 ProRM+ 的 population objective 是
 
 $$
 \boxed{
-\mathcal L_{\mathrm{SRM+}}(\phi)
-=\frac1{2\beta}m_\phi^\top F_0^\dagger m_\phi
+\min_\phi\max_v
+\frac1\beta
+\left[
+v^\top m_\phi
+-\frac12v^\top F_0v
+\right]
+}.
+$$
+
+展开两个 expectations：
+
+$$
+\min_\phi\max_v
+\left\{
+\frac1{2\beta}
+\mathbb E_{e,h}[(z_0(e)^\top v)(\Delta r_\phi(e)-h(e))]
+-\frac1{2\beta}
+\mathbb E_{x,y}[(s_0(x,y)^\top v)^2]
+\right\}.
+$$
+
+在 natural `Q_0`、条件 iid repeated labels、reward/score 可积、局部二阶近似和无阻尼 Fisher
+条件下：
+
+$$
+\boxed{
+\max_v\mathcal J_{\mathrm{ProRM+}}(\phi,v)
+=\mathcal L_{\mathrm{ProRM}}(\phi)
 =\widetilde{\operatorname{Reg}}(r_\phi)
 }.
 $$
 
-对应的 Fenchel 形式为
+这是本项目的核心 identity。最小范数 dual witness 为 `v=F_0^dagger m_phi`。
 
-$$
-\min_\phi\max_v\;
-\frac1{2\beta}\mathbb E[(z^\top v)(t_\phi-h)]
--\frac1{2\beta}\mathbb E[(s^\top v)^2].
-$$
+### 5.3 不要混淆 dual witness 与 policy direction
 
-最小范数最优 dual witness 是 `v=F_0^dagger m_phi`。它指出哪些 policy coordinates 正在放大
-当前 reward moment error，但不是某个 reward learner 的 rollout update。为避免术语混淆：
-
-- `u_r=(F+lambda I)^-1 g_r` 是未乘 `1/beta` 的 natural-gradient direction；
+- `u_r=(F+lambda*I)^-1 g_r` 是未除以 `beta` 的 damped natural direction；
 - `delta_r=u_r/beta` 才是局部 policy displacement；
-- `v=(F+lambda I)^-1 m` 是 reward-error 的 dual witness；population、`lambda=0` 时
-  `v=beta*(delta_phi-delta*)`。
+- `v=(F+lambda*I)^-1 m` 是 reward-error dual witness；
+- population、`lambda=0` 时 `v=beta*(delta_phi-delta*)`。
 
-## 5. 从 population theorem 到有限样本目标
+## 6. Finite-sample ridge ProRM+
 
-令 `S in R^(n_F x d)` 的每一行为一个 node score，`Z in R^(n_E x d)` 的每一行为
-一个标注 edge difference。实现固定使用
+令 `S in R^(n_F x d)` 为 node scores，`Z in R^(n_E x d)` 为 edge score differences。固定
 
 $$
-\widehat F=\frac1{n_F}S^\top S,
+\widehat F_0=\frac1{n_F}S^\top S,
 \qquad
-\widehat m_\phi=\frac1{2n_E}Z^\top(t_\phi-h).
+\widehat m_\phi
+=\frac1{2n_E}Z^\top(\Delta r_\phi-h).
 $$
 
-通常 `d>n_F`，所以经验 Fisher 必然秩亏。工程目标显式采用
+由于通常 `d>n_F`，经验 Fisher 必然秩亏。实际训练的 ProRM+ objective 必须显式写成
 
 $$
-\widehat L_\lambda(\phi)
-=\frac1{2\beta}\widehat m_\phi^\top
-(\widehat F+\lambda I)^{-1}\widehat m_\phi,
+\boxed{
+\min_\phi\max_v
+\frac1\beta
+\left[
+v^\top\widehat m_\phi
+-\frac12v^\top(\widehat F_0+\lambda I)v
+\right]
+},
 $$
 
 其中
 
 $$
-\lambda=c\,\operatorname{mean}(\operatorname{diag}\widehat F)>0.
+\lambda
+=c\,\operatorname{mean}(\operatorname{diag}\widehat F_0)>0.
 $$
 
-这里必须区分：
+内层唯一解与报告值为
 
-| 层级 | 对象 | 可以声称什么 |
+$$
+v_\phi^*=(\widehat F_0+\lambda I)^{-1}\widehat m_\phi,
+$$
+
+$$
+\boxed{
+\widehat L_{\mathrm{ProRM+},\lambda}(\phi)
+=\frac1{2\beta}\widehat m_\phi^\top
+(\widehat F_0+\lambda I)^{-1}\widehat m_\phi
+}.
+$$
+
+必须区分三个层级：
+
+| 层级 | Fisher | 可以声称什么 |
 |---|---|---|
-| population theorem | `F_0^dagger`, `lambda=0` | 与局部 regret 精确等价 |
-| finite-sample experiment | `F_hat+lambda I`, `lambda>0` | ridge-regularized empirical surrogate |
-| sensitivity | `c in {1e-4,1e-3,1e-2}` | 结论是否依赖阻尼尺度 |
+| Population theorem | `F_0^dagger`, `lambda=0` | ProRM+ inner optimum 与 local ProRM regret 精确相等 |
+| Finite-sample experiment | `F_hat+lambda*I`, `lambda>0` | Ridge empirical surrogate |
+| Sensitivity | `c in {1e-4,1e-3,1e-2}` | 检查结论是否依赖阻尼尺度 |
 
-不得把有限样本 ridge loss 写成 population pseudoinverse theorem 的“精确实现”。
+不得把 empirical ridge objective 称为 population identity 的“精确实现”。
 
-isotropic ridge `lambda*I` 也不具任意 tangent 重参数化不变性；
-`lambda=c*mean(diag(F_hat))` 只消除统一的全局尺度变化，不能抵消各坐标的非等比例变换。
-因此 fixed-A seed/state、LoRA alpha、B 参数顺序、shape、scale 和 hash 都是经验目标定义的一部分，
-不只是运行 provenance。训练与 rollout 必须复用完全相同的坐标系。
+### 6.1 Ridge 的坐标依赖性
 
-同一机制在实验中出现为三个不同对象：
+`lambda*I` 不具任意 tangent reparameterization invariance。
+`lambda=c*mean(diag(F_hat))` 只消除统一全局尺度，不能抵消各坐标的非等比例变化。因此
+fixed-A seed/state、LoRA alpha、B layout、shape、scale、flatten order 与 hash 都是 empirical
+objective 的科学定义，而不只是 provenance。训练与 rollout 必须复用同一坐标。
 
-| 用途 | Moment/Fisher | 阻尼语义 |
+### 6.2 Train 与 held-out 不是同一个 estimator
+
+| 用途 | Moment/Fisher | Damping |
 |---|---|---|
-| theorem | population `g_phi-g*`, `F_0` | pseudoinverse，`lambda=0` |
-| train | canonical-pair `m_hat`, train node `F_hat` | `lambda_train` 由 train Fisher 解析 |
-| held-out | prompt covariance `g_hat_error`, held-out node Fisher | 每个 split 独立解析 `lambda_split` |
+| theorem | population `A_0(r_phi-r*)`, `F_0` | pseudoinverse，`lambda=0` |
+| train | canonical-edge `m_hat`, train node `F_hat` | 由 train Fisher 解析 |
+| held-out | prompt covariance `g_hat_error`, held-out node Fisher | 每个 split 独立解析 |
 
-held-out covariance 直接估计 `g_error`，所以没有 pair identity 的 `1/2`；这不是常数因子冲突。
+Held-out covariance 直接估计 `g_error`，所以没有 pair identity 中的 `1/2`；这不是常数冲突。
 
-## 6. PCG、目标值与 envelope gradient
+## 7. PCG、reported value 与 envelope gradient
 
-### 6.1 Matrix-free solve
+### 7.1 Matrix-free dual solve
 
-每一步先求解
-
-$$
-(\widehat F+\lambda I)v=\widehat m_\phi.
-$$
-
-PCG 只需要矩阵向量积
+每个 outer optimizer step 先求解
 
 $$
-u\mapsto \frac1{n_F}S^\top(Su)+\lambda u,
+(\widehat F_0+\lambda I)v=\widehat m_\phi.
 $$
 
-无需显式构造 `d x d` Fisher。求解必须满足相对残差门槛；不收敛不是可忽略 warning。
-
-### 6.2 两个容易混淆的 scalar
-
-求得 `v` 后，报告的目标值是
+PCG 只调用
 
 $$
-\widehat L_\lambda=\frac1{2\beta}\widehat m_\phi^\top v.
+u\longmapsto\frac1{n_F}S^\top(Su)+\lambda u,
 $$
 
-但若在 autograd 中 detach `v`，直接对上述 scalar 反传会少一个来自二次型对称性的因子 2。
-正确的 envelope gradient 是
+无需形成 `d x d` Fisher。主配置固定 relative tolerance `1e-5`、最多 100 iterations，并使用
+damped Fisher diagonal 的 Jacobi preconditioner。最终 evidence 保存真实 `rhs-Ax` residual；
+未收敛是 fail-closed condition，不是 warning。
+
+### 7.2 三个 scalar 必须分开
+
+解得 `v` 后，报告的 ridge quadratic 是
 
 $$
-\nabla_\phi\widehat L_\lambda
-=\frac1{2\beta n_E}\sum_i
-(z_i^\top v)\nabla_\phi t_{\phi,i}.
+\widehat L_{\mathrm{reported}}
+=\frac1{2\beta}\widehat m_\phi^\top v.
 $$
 
-因此代码使用 mean-reduced surrogate
+其精确 envelope gradient 为
+
+$$
+\nabla_\phi\widehat L_{\mathrm{reported}}
+=\frac1{2\beta n_E}
+\sum_i(z_i^\top v)\nabla_\phi\Delta r_{\phi,i}.
+$$
+
+若在 autograd 中 detach `v`，必须使用 mean-reduced surrogate
 
 $$
 \widehat L_{\mathrm{env}}
 =\frac1{n_E}\sum_i
 \frac{z_i^\top\operatorname{stopgrad}(v)}{2\beta}
-(t_{\phi,i}-h_i).
+(\Delta r_{\phi,i}-h_i).
 $$
 
-`L_env` 的数值不是要报告的 objective；它的职责只是产生精确 envelope gradient。仓库分别
-实现 `dual_loss`（报告值）和 `envelope_surrogate`（训练梯度），禁止混用。
-
-同一个 full batch、精确 solve 下，二者数值关系为
+同一 full batch、精确 solve 下：
 
 $$
 \widehat L_{\mathrm{env}}
-=\frac1\beta v^\top\widehat m
-=2\widehat L_\lambda.
+=\frac1\beta v^\top\widehat m_\phi
+=2\widehat L_{\mathrm{reported}}.
 $$
 
-完整 saddle diagnostic 是
+它的数值不是论文 objective；它只产生正确 gradient。完整 saddle diagnostic 为
 
 $$
 \widehat L_{\mathrm{saddle}}(\phi,v)
-=\frac1\beta\left(v^\top\widehat m-\frac12v^\top
-(\widehat F+\lambda I)v\right).
+=\frac1\beta
+\left[
+v^\top\widehat m_\phi
+-\frac12v^\top(\widehat F_0+\lambda I)v
+\right].
 $$
 
-当 `v` 精确最优时它的数值等于 `L_lambda`，并给出同一个 envelope gradient。训练 surrogate
-省略了与 `phi` 无关的二次项，所以数值变为 `2*L_lambda`；代码同时记录 reported value 与
-saddle value，二者在 PCG 未收敛时不必相同。
+最优 `v` 时，saddle value 等于 reported value；PCG 近似时两者可能不同。仓库分别记录
+reported quadratic、saddle diagnostic 和 training surrogate，禁止混用。
 
-### 6.3 外层更新顺序
+### 7.3 外层更新顺序
 
-每次 optimizer update 必须执行：
+每次 optimizer update 固定执行：
 
 ```text
-all edge margins
+all training-edge margins
   -> one full moment m_hat
-  -> warm-start PCG solve
+  -> warm-started PCG solve
   -> detach v
-  -> accumulate one full-data envelope gradient by microbatches
+  -> microbatch accumulation of one full-data envelope gradient
   -> exactly one optimizer step
-  -> recompute everything
+  -> recompute margins, moment and dual
 ```
 
-microbatch 只改变梯度累积的内存占用，不能创建 batch-local `m` 或 `F`；一个 `v` 不能作为
-stale dual direction 连续训练多个 outer steps。
+Microbatch 只改变内存占用，不创建 batch-local moment/Fisher。一个 dual direction 不得跨多个
+outer steps stale reuse。主实验固定 720 次 fresh-dual updates，validation 不选择 checkpoint。
 
-## 7. Held-out 几何与 downstream direction
+## 8. Held-out geometry and downstream evaluation
 
-对于每个 held-out prompt 的 `M` 个 candidates，prompt-level reward gauge 必须被消去。使用
+### 8.1 Prompt-centered held-out moment
+
+每个 held-out prompt 有 `M` 个 candidates。为有限样本中精确消除 prompt reward gauge，使用
 
 $$
 \widehat g_r
-=\frac1{P(M-1)}\sum_{i=1}^{P}\sum_{j=1}^{M}
+=\frac1{P(M-1)}
+\sum_{i=1}^{P}\sum_{j=1}^{M}
 (s_{ij}-\bar s_i)(r_{ij}-\bar r_i).
 $$
 
-这里 covariance 的无偏分母是 `P(M-1)`；held-out node Fisher 仍使用 `PM`。主要几何指标为：
+Covariance 的无偏分母是 `P(M-1)`；held-out node Fisher 仍用 `PM`。每个 split 从自身 Fisher
+独立解析 absolute damping。主要 geometry metrics 是：
 
-1. reward moment error 的 ridge local regret；
-2. predicted 与 target damped natural direction 的 undamped-Fisher squared error；
-3. 两个 direction 的 Fisher cosine。
+1. reward moment error 的 held-out ridge local-regret proxy；
+2. predicted 与 target damped natural directions 的 undamped-Fisher squared error；
+3. 两个 directions 的 Fisher cosine。
 
-这里报告的是 **held-out ridge local-regret proxy**。令
-`Delta u=(F+lambda I)^-1 m_error`，则 squared Fisher direction error 是
-`Delta u^T F Delta u`。只有 `lambda=0` 时它与 regret 满足简单的 `2*beta` 比例；
-`lambda>0` 时二者是相关但不同的预注册指标。
+若任一 direction 的 Fisher norm 为零，cosine 未定义，正式结果必须 fail closed。
 
-真正下游 rollout 进一步把 BT/SRM+ direction 分别匹配到同一个**实测 sequence-level
-forward KL**。Fisher 二次近似只用于提供 line-search 初值，不能作为接受更新的最终证据。
+### 8.2 Prediction metrics 只是描述指标
 
-## 8. 假设、失效方式与工程保护
+Held-out preference diagnostics 报告：
 
-| 假设 | 若违反会发生什么 | 当前保护 |
+- BTL negative log-likelihood；
+- pairwise ordering accuracy；
+- predicted BTL probability 与 operational-oracle BTL probability 的 mean absolute error。
+
+这些指标回答 preference fit，不是 ProRM+ 的 primary success gate。它们的作用是显示
+preference geometry 与 policy geometry 是否出现预期分离，不能替代 downstream evidence。
+
+### 8.3 Matched measured-KL policy optimization
+
+分别由 BT-MLE 与 ProRM+ reward moments 构造 natural direction。Fisher quadratic
+
+$$
+\alpha_{\mathrm{init}}
+=\sqrt{\frac{2\kappa}{d^\top Fd}}
+$$
+
+只提供 line-search 初值。每个方法必须独立测量更新后 policy 对 reference policy 的
+sequence-level forward KL，并匹配到
+
+$$
+\kappa=0.01\quad\text{with relative tolerance }0.05.
+$$
+
+最终接受依据是 measured KL，不是二阶预测。随后用 common-random candidate indices 比较
+zero-B、BT-MLE update 与 ProRM+ update 的 transformed-oracle reward improvement。
+
+## 9. Assumptions, failure modes and protections
+
+| Assumption | Violation | Current protection |
 |---|---|---|
-| 局部二阶 KL 有效 | regret 等式不能外推到大更新 | measured-KL budget `0.01`；一次局部更新 |
-| candidate 真来自 `pi_0` | score identity/Fisher 分布错配 | 同一 FP32 instance 生成并计算 score |
-| tangent 坐标一致 | 优化了不会被实际 update 使用的方向 | fixed-A、zero-B、同一参数 layout/hash |
-| 同一 edge labels 条件 iid BTL | `h` 不再识别同一个真实 margin | controlled oracle Phase 1；现实数据只作 robustness |
-| `N` 独立且生存概率正确 | randomized estimator 有偏 | named RNG stream、禁止硬截断 |
-| reward/score 二阶可积 | moment/Fisher 不稳定 | bounded oracle transform、概率 floor |
-| train/evaluation 隔离 | target leakage 使比较失效 | train dataclass 不允许 true reward |
-| PCG/KL search 收敛 | direction 或步长没有定义 | fail closed，不丢弃失败 seed |
-| 所搜正向 ray 上 measured KL 可局部单调 bracket | 二分法不能可靠定位 target | 只接受实测 KL 达容差；否则 fail closed |
+| Local reward/KL Taylor model is adequate | ProRM identity cannot be extrapolated to a large update | One update; measured-KL budget `0.01` |
+| Candidates are sampled from `pi_0` | Score identity and Fisher distribution are wrong | Same FP32 instance; exact tokens; no filtering |
+| Tangent coordinates match | Objective weights unusable policy directions | Fixed-A, zero-B, identical layout/scale/hash |
+| Edge law is natural `Q_0` | Pair moment no longer identifies `A_0r` without correction | Canonical `0-1` endpoints are independent base samples |
+| Repeated labels are conditionally iid BTL | `h` no longer identifies one target margin | Controlled Phase 1 oracle; human data only robustness |
+| `N` is independent with correct survival law | Randomized estimator becomes biased | Named RNG streams; no clipping or silent resampling |
+| Rewards and scores have sufficient moments | Fisher/moment variance can diverge | Bounded oracle transform; probability floor |
+| Train and evaluation targets are isolated | Target leakage invalidates comparison | Train tensor schema cannot contain true rewards |
+| PCG and measured-KL search converge | Direction or step size is undefined | Fail closed; failed seed cannot be discarded |
+| Measured KL is locally bracketable on the positive ray | Bisection cannot locate target | Accept only measured KL within tolerance |
 
-policy 一旦离开 `pi_0` 并继续训练，必须重新生成 candidates、scores 和 Fisher；本定理不支持
-把旧几何无限复用到多轮 RLHF。
+If policy optimization moves materially away from `pi_0`, candidates, scores, Fisher and repeated-label
+moments must be regenerated around the new reference. The one-reference theorem does not justify reusing
+old geometry indefinitely.
 
-## 9. 数学对象与代码位置
+## 10. Mathematical objects and compatibility code paths
 
-| 数学对象 | 实现 |
+Public terminology is ProRM/ProRM+. The repository and Python namespace remain `Smart-Reward-Model` and
+`smart_reward`; several internal identifiers retain historical names for artifact compatibility.
+
+| Object | Current implementation |
 |---|---|
 | randomized `h` | `src/smart_reward/annotations.py` |
-| `m_hat`、reported value、envelope weights | `src/smart_reward/objective.py` |
-| matrix-free Fisher/PCG | `src/smart_reward/linear.py`, `pcg.py` |
+| `m_hat`, reported quadratic, envelope weights | `src/smart_reward/objective.py` |
+| matrix-free Fisher and PCG | `src/smart_reward/linear.py`, `pcg.py` |
 | fixed-A LoRA score/layout | `src/smart_reward/hf.py`, `scores.py` |
-| BT/SRM+ fixed-step trainers | `src/smart_reward/training.py` |
-| held-out local geometry | `src/smart_reward/metrics.py` |
-| natural direction与 measured KL | `src/smart_reward/rollout.py`, `policy_update.py` |
+| BT-MLE / ProRM+ fixed-step trainers | `src/smart_reward/training.py` |
+| held-out policy geometry | `src/smart_reward/metrics.py` |
+| natural directions and measured KL | `src/smart_reward/rollout.py`, `policy_update.py` |
 | real-model orchestration | `src/smart_reward/phase1.py`, `phase1_rollout.py` |
 
-## 10. 理论基础与组合贡献边界
+The public CLI is `prorm`; the historical `smart-reward` executable remains a compatibility alias during
+migration.
 
-本项目使用的基础工具各有明确来源：
+## 11. Foundations and contribution boundary
 
-- Fisher/natural policy-gradient 几何建立在
+The project composes established tools:
+
+- Fisher/natural policy-gradient geometry builds on
   [Kakade, 2001](https://papers.nips.cc/paper_files/paper/2001/hash/4b86abe48d358ecf194c56c69108433e-Abstract.html)
-  以及 trust-region policy optimization
-  [Schulman et al., 2015](https://arxiv.org/abs/1502.05477) 一类工作之上；
-- pairwise logistic preference model 来自
-  [Bradley & Terry, 1952](https://academic.oup.com/biomet/article-abstract/39/3-4/324/326091)；
-- 幂的无偏组合估计使用经典
-  [Hoeffding U-statistics](https://www.jstor.org/stable/2235637)；
-- randomized truncation/debiasing 与
-  [McLeish, 2011](https://arxiv.org/abs/1005.2228)、
-  [Rhee & Glynn, 2015](https://web.stanford.edu/~glynn/papers/2015/RheeG15.pdf)
-  的一般思想同源；
-- moment objective 的统计语言建立在
-  [Hansen, 1982](https://larspeterhansen.org/lph_research/large-sample-properties-of-generalized-method-of-moments-estimators/)
-  的 GMM 框架之上。
+  and trust-region policy optimization
+  [Schulman et al., 2015](https://arxiv.org/abs/1502.05477);
+- pairwise logistic preferences use the
+  [Bradley–Terry model](https://academic.oup.com/biomet/article-abstract/39/3-4/324/326091);
+- unbiased estimates of powers use classical
+  [Hoeffding U-statistics](https://www.jstor.org/stable/2235637);
+- randomized truncation follows the general debiasing ideas of
+  [McLeish, 2011](https://arxiv.org/abs/1005.2228) and
+  [Rhee & Glynn, 2015](https://web.stanford.edu/~glynn/papers/2015/RheeG15.pdf);
+- the moment-estimation language builds on
+  [Hansen, 1982](https://larspeterhansen.org/lph_research/large-sample-properties-of-generalized-method-of-moments-estimators/).
 
-这些基础本身不是本项目的原创主张。本项目要检验的组合点是：把“一次局部 policy update
-的 Fisher-inverse regret”连接到“可由逐 edge randomized repeated labels 识别的 reward
-moment error”，再把该对象实现为固定 tangent、泄漏隔离、matched-KL downstream evaluation
-和 fail-closed provenance 的完整实验协议。
+These ingredients are not individually claimed as new. The proposed combination is:
 
-这一定义说明了当前 method name `SRM+` 的作用，但仓库没有单独实现一个名为 `SRM` 的
-baseline；“+”不是一条已完成 ablation hierarchy。是否构成文献意义上的新颖贡献，仍需在
-论文阶段完成更广泛的 related-work review，不能仅由本工程文档断言。
+1. define reward-model quality prospectively through downstream policy regret;
+2. reduce the global bilevel objective to a local Fisher-inverse ProRM target;
+3. identify its reward-error moment from natural pairs using randomized repeated labels;
+4. train the resulting ProRM+ objective with a matrix-free Fisher–GMM dual;
+5. test the mechanism under fixed tangent coordinates, leakage isolation and matched measured-KL policy
+   optimization.
 
-## 11. 论文表述边界
+## 12. Paper claim boundary
 
-1. 只有 `lambda=0` 的 population pseudoinverse 目标与 local regret 精确等价；`lambda>0`
-   是 ridge empirical target，必须报告 sensitivity。
-2. SRM+ 在当前实验中比较的是受限、可能 misspecified 的 reward class；是否在有限 train
-   candidates 上观察到线性不可表示证据由 projection diagnostic 描述，不能由 capacity
-   bottleneck 预先断言。该实验不宣称对所有 reward class、所有数据都优于 BT。
-3. 若真实 annotator 偏离同质 BTL 或重复 labels 不条件 iid，`h` 的识别对象会改变。
-4. 固定 `L` 个 labels 只能识别 logit 级数的前 `L` 项。CoVal 阶段必须称为
-   **candidate-restricted truncated SRM+ robustness**，不能援引精确无偏定理。
-5. pairwise accuracy 是诊断指标。只有 held-out policy geometry 与 matched-KL rollout 的
-   预注册证据同时通过，才能支持主要机制结论。
+1. Exact equality holds for the population, local, undamped pseudoinverse target. Finite-sample ridge is a
+   regularized surrogate and requires damping sensitivity.
+2. Phase 1 uses a restricted reward class and an operational oracle. It does not establish human utility.
+3. A capacity bottleneck does not prove misspecification. The train-only projection residual is descriptive.
+4. If real annotators violate homogeneous conditionally iid BTL, `h` identifies a different object.
+5. Fixed-`L` human data supports only truncated ProRM+ robustness.
+6. The closed-form example proves a population ProRM/BT-MLE ordering reversal, not the ProRM+ repeated-label
+   theorem or an empirical effect.
+7. Preference NLL, accuracy and probability MAE are diagnostics. A positive mechanism claim requires both
+   held-out policy geometry and matched measured-KL rollout evidence.
+8. Until the pinned HPC4 runs and preregistered aggregation finish, the repository contains no empirical
+   claim that ProRM+ outperforms BT-MLE.
