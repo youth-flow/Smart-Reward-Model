@@ -1,0 +1,65 @@
+run:
+  name: controlled-main
+  seeds: [20260722, 20260723, 20260724, 20260725, 20260726]
+  num_prompts: 2048
+  split_sizes: {train: 1536, validation: 256, test: 256}
+
+data:
+  prompt_dataset: allenai/multipref
+  prompt_revision: 12910233a0238a997ebe425656e9dfed7b0ff031
+  num_candidates: 4
+
+policy:
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  dtype: float32
+  max_prompt_tokens: 384
+  max_response_tokens: 128
+  sampling:
+    do_sample: true
+    temperature: 1.0
+    top_p: 1.0
+    top_k: 0
+    min_new_tokens: 0
+    repetition_penalty: 1.0
+  lora_rank: 4
+  lora_alpha: 4
+  lora_dropout: 0.0
+  lora_layers: [20, 21, 22, 23]
+  lora_modules: [q_proj, v_proj]
+  trainable_tangent_parameters: lora_B_only
+
+oracle:
+  model: Skywork/Skywork-Reward-V2-Qwen3-0.6B
+  revision: 8c14a4e9e6321deaf572544339b16b8d6bbe8886
+  dtype: float32
+  transform: robust_center_scale_then_tanh
+  robust_scale: scaled_mad
+  robust_scale_floor: 1.0e-6
+  probability_floor: 0.25
+
+annotations:
+  scheme: geometric_randomized_truncation
+  gamma: 0.9
+
+objective:
+  beta: 1.0
+  damping_relative_to_mean_fisher_diagonal: 0.001
+  damping_sensitivity_multipliers: [0.1, 1.0, 10.0]
+  pcg_tolerance: 1.0e-5
+  pcg_max_iterations: 100
+
+reward_model:
+  model: Qwen/Qwen2.5-0.5B-Instruct
+  revision: 7ae557604adf67be50417f59c2c2f167def9a775
+  dtype: float32
+  parameterization: frozen_backbone_linear_head
+  feature_pooling: last_response_token
+  linear_head_bias: false
+  outer_steps: 720
+  refresh_dual_every_steps: 1
+  learning_rate: 1.0e-3
+  weight_decay: 0.0
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  max_grad_norm: 1.0

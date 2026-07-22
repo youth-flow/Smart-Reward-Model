@@ -1,0 +1,49 @@
+# Local research material kept outside version control.
+/*.pdf
+/*.jpg
+/*.jpeg
+/*.png
+/*.eml
+/export-*.txt
+
+# Secrets and local machine settings.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python.
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Generated research artifacts and heavyweight files.
+/data/
+/artifacts/
+/outputs/
+/runs/
+/logs/
+/checkpoints/
+/wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.sif
+
+# Editors and operating systems.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
