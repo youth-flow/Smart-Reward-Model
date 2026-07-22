@@ -30,13 +30,9 @@ def test_randomized_u_statistic_is_monte_carlo_unbiased(probability: float) -> N
 
 def test_stable_recurrence_and_fixed_order_special_case() -> None:
     expected_two_wins = 1.0 + 1.0 / (2.0 * 0.9)
-    assert repeated_labels_to_h([1, 1], gamma=0.9).item() == pytest.approx(
-        expected_two_wins
-    )
+    assert repeated_labels_to_h([1, 1], gamma=0.9).item() == pytest.approx(expected_two_wins)
     assert repeated_labels_to_h([1, 0], gamma=0.9).item() == pytest.approx(0.0)
-    assert repeated_labels_to_h([1, 1, 1], gamma=1.0).item() == pytest.approx(
-        1.0 + 0.5 + 1.0 / 3.0
-    )
+    assert repeated_labels_to_h([1, 1, 1], gamma=1.0).item() == pytest.approx(1.0 + 0.5 + 1.0 / 3.0)
 
 
 def test_geometric_repeated_label_batch_is_consistent() -> None:

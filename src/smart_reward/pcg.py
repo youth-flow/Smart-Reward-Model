@@ -195,9 +195,7 @@ def pcg(
         next_residual_preconditioned = torch.dot(residual, preconditioned)
         next_rz_value = float(next_residual_preconditioned.item())
         if not math.isfinite(next_rz_value) or next_rz_value <= 0.0:
-            raise PCGBreakdownError(
-                "non-positive preconditioned residual norm during iteration"
-            )
+            raise PCGBreakdownError("non-positive preconditioned residual norm during iteration")
         beta = next_residual_preconditioned / residual_preconditioned
         if not bool(torch.isfinite(beta)):
             raise PCGBreakdownError("PCG produced a non-finite conjugacy coefficient")

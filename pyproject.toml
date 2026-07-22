@@ -10,8 +10,12 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Smart Reward Model contributors" }]
 dependencies = [
+  "pyyaml>=6,<7",
   "torch>=2.4,<3",
 ]
+
+[project.scripts]
+smart-reward = "smart_reward.cli:main"
 
 [project.optional-dependencies]
 llm = [
@@ -20,9 +24,9 @@ llm = [
   "numpy>=1.26,<3",
   "peft>=0.14,<1",
   "pyarrow>=17",
-  "pyyaml>=6,<7",
   "safetensors>=0.4,<1",
-  "transformers>=4.48,<6",
+  # The pinned Skywork oracle is Qwen3 and records Transformers 4.52.3.
+  "transformers>=4.52.3,<5",
 ]
 dev = [
   "pytest>=7.4,<9",

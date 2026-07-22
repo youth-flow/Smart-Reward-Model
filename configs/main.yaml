@@ -58,8 +58,18 @@ reward_model:
   linear_head_bias: false
   outer_steps: 720
   refresh_dual_every_steps: 1
+  optimizer: adamw
   learning_rate: 1.0e-3
   weight_decay: 0.0
-  batch_size: 8
-  gradient_accumulation_steps: 4
+  microbatch_size: 64
   max_grad_norm: 1.0
+
+evaluation:
+  heldout_moment: per_prompt_unbiased_covariance
+  kl_budget: 0.01
+  kl_relative_tolerance: 0.05
+  kl_probe_candidates: 16
+  rollout_candidates_per_prompt: 4
+  report_pairwise_accuracy: true
+  paired_bootstrap_resamples: 10000
+  paired_bootstrap_seed: 20260722

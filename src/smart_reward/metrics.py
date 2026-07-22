@@ -195,9 +195,7 @@ def _resolve_fisher_geometry(
         if product.shape != (dimension,):
             raise ValueError(f"fisher_operator output must have shape ({dimension},)")
         if product.dtype != flat_scores.dtype or product.device != flat_scores.device:
-            raise ValueError(
-                "fisher_operator output must share dtype and device with score_matrix"
-            )
+            raise ValueError("fisher_operator output must share dtype and device with score_matrix")
         if not bool(torch.isfinite(product).all()):
             raise ValueError("fisher_operator output must be finite")
         return product
@@ -440,21 +438,17 @@ def natural_direction_metrics(
     squared_error = torch.dot(difference, fisher_difference).clamp_min(0.0)
     fisher_predicted = resolved_operator(predicted_direction)
     fisher_target = resolved_operator(target_direction)
-    predicted_squared_norm = torch.dot(
-        predicted_direction, fisher_predicted
-    ).clamp_min(0.0)
+    predicted_squared_norm = torch.dot(predicted_direction, fisher_predicted).clamp_min(0.0)
     target_squared_norm = torch.dot(target_direction, fisher_target).clamp_min(0.0)
     predicted_norm = torch.sqrt(predicted_squared_norm)
     target_norm = torch.sqrt(target_squared_norm)
     denominator = predicted_norm * target_norm
     if float(denominator.item()) == 0.0:
-        cosine = torch.full(
-            (), float("nan"), dtype=flat_scores.dtype, device=flat_scores.device
-        )
+        cosine = torch.full((), float("nan"), dtype=flat_scores.dtype, device=flat_scores.device)
     else:
-        cosine = (
-            torch.dot(predicted_direction, fisher_target) / denominator
-        ).clamp(min=-1.0, max=1.0)
+        cosine = (torch.dot(predicted_direction, fisher_target) / denominator).clamp(
+            min=-1.0, max=1.0
+        )
     return NaturalDirectionMetrics(
         predicted_direction=predicted_direction,
         target_direction=target_direction,

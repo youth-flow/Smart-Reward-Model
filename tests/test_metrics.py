@@ -10,15 +10,11 @@ from smart_reward.metrics import (
 
 
 def test_gauge_centering_removes_per_prompt_constants() -> None:
-    rewards = torch.tensor(
-        [[1.0, -1.0, 2.0], [3.0, 4.0, -2.0]], dtype=torch.float64
-    )
+    rewards = torch.tensor([[1.0, -1.0, 2.0], [3.0, 4.0, -2.0]], dtype=torch.float64)
     offsets = torch.tensor([[8.0], [-13.0]], dtype=torch.float64)
 
     assert torch.allclose(gauge_center(rewards + offsets), gauge_center(rewards))
-    assert torch.allclose(
-        gauge_center(rewards).mean(dim=-1), torch.zeros(2, dtype=torch.float64)
-    )
+    assert torch.allclose(gauge_center(rewards).mean(dim=-1), torch.zeros(2, dtype=torch.float64))
 
 
 def test_local_metrics_are_gauge_invariant() -> None:
@@ -85,9 +81,9 @@ def test_moment_uses_m_minus_one_covariance_but_fisher_uses_node_mean() -> None:
     num_prompts, num_candidates = rewards.shape
     centered_scores = scores - scores.mean(dim=1, keepdim=True)
     centered_rewards = rewards - rewards.mean(dim=1, keepdim=True)
-    expected_moment = (
-        centered_scores.reshape(-1, 2).mT @ centered_rewards.reshape(-1)
-    ) / (num_prompts * (num_candidates - 1))
+    expected_moment = (centered_scores.reshape(-1, 2).mT @ centered_rewards.reshape(-1)) / (
+        num_prompts * (num_candidates - 1)
+    )
 
     actual_moment = policy_reward_moment(scores, rewards)
     assert torch.allclose(actual_moment, expected_moment, rtol=1.0e-13, atol=1.0e-13)
@@ -104,9 +100,7 @@ def test_moment_uses_m_minus_one_covariance_but_fisher_uses_node_mean() -> None:
 
 
 def test_metrics_accept_external_fisher_matrix() -> None:
-    scores = torch.tensor(
-        [[[1.0, 0.0], [-1.0, 2.0], [0.5, -0.5]]], dtype=torch.float64
-    )
+    scores = torch.tensor([[[1.0, 0.0], [-1.0, 2.0], [0.5, -0.5]]], dtype=torch.float64)
     rewards = torch.tensor([[1.0, -2.0, 0.5]], dtype=torch.float64)
     external_fisher = torch.tensor([[2.0, 0.3], [0.3, 1.4]], dtype=torch.float64)
     damping = 0.2
@@ -135,6 +129,4 @@ def test_perfect_rewards_have_zero_regret_and_direction_error() -> None:
 
     assert regret.item() == 0.0
     assert metrics.squared_fisher_error.item() == 0.0
-    assert torch.allclose(
-        metrics.fisher_cosine, torch.ones((), dtype=torch.float64), atol=1.0e-12
-    )
+    assert torch.allclose(metrics.fisher_cosine, torch.ones((), dtype=torch.float64), atol=1.0e-12)

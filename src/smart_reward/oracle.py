@@ -121,9 +121,7 @@ def btl_probabilities(margins: torch.Tensor) -> torch.Tensor:
     tolerance = 8.0 * torch.finfo(probabilities.dtype).eps
     lower_bound = 0.25 - tolerance
     upper_bound = 0.75 + tolerance
-    if bool((probabilities < lower_bound).any()) or bool(
-        (probabilities > upper_bound).any()
-    ):
+    if bool((probabilities < lower_bound).any()) or bool((probabilities > upper_bound).any()):
         raise AssertionError("controlled-oracle BTL probabilities must lie in [0.25, 0.75]")
     return probabilities
 

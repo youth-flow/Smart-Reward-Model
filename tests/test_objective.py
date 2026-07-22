@@ -47,8 +47,7 @@ def test_envelope_weight_matches_finite_difference() -> None:
         return 0.5 * torch.dot(candidate_moment, torch.linalg.solve(operator, candidate_moment))
 
     finite_difference = (
-        exact_loss(margins + epsilon * perturbation)
-        - exact_loss(margins - epsilon * perturbation)
+        exact_loss(margins + epsilon * perturbation) - exact_loss(margins - epsilon * perturbation)
     ) / (2.0 * epsilon)
     envelope_derivative = torch.mean(weights * perturbation)
 

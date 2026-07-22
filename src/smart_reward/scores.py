@@ -65,10 +65,14 @@ def sequence_log_probs(
     if logits.dtype in (torch.float16, torch.bfloat16):
         shifted_logits = shifted_logits.float()
     shifted_ids = input_ids[:, 1:].to(dtype=torch.long)
-    token_log_probs = shifted_logits.log_softmax(dim=-1).gather(
-        dim=-1,
-        index=shifted_ids.unsqueeze(-1),
-    ).squeeze(-1)
+    token_log_probs = (
+        shifted_logits.log_softmax(dim=-1)
+        .gather(
+            dim=-1,
+            index=shifted_ids.unsqueeze(-1),
+        )
+        .squeeze(-1)
+    )
     shifted_response_mask = response_mask[:, 1:].to(dtype=torch.bool)
     return token_log_probs.masked_fill(~shifted_response_mask, 0.0).sum(dim=-1)
 
@@ -297,8 +301,7 @@ class ParameterLayout:
                 raise TypeError(f"gradient for {entry.name!r} must be floating point")
             is_single = tuple(gradient.shape) == entry.shape
             is_batched = (
-                gradient.ndim == len(entry.shape) + 1
-                and tuple(gradient.shape[1:]) == entry.shape
+                gradient.ndim == len(entry.shape) + 1 and tuple(gradient.shape[1:]) == entry.shape
             )
             if not is_single and not is_batched:
                 raise ValueError(f"gradient for {entry.name!r} has the wrong shape")

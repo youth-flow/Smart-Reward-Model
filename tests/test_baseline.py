@@ -14,9 +14,7 @@ def test_repeated_btl_matches_expanded_labels() -> None:
 
     expanded_margin = torch.tensor([1.25, 1.25, 1.25, -0.7, -0.7], dtype=torch.float64)
     expanded_label = torch.tensor([1.0, 1.0, 0.0, 1.0, 0.0], dtype=torch.float64)
-    expected = functional.softplus(expanded_margin).sub(
-        expanded_label * expanded_margin
-    ).mean()
+    expected = functional.softplus(expanded_margin).sub(expanded_label * expanded_margin).mean()
 
     assert torch.allclose(repeated_btl_nll(margins, wins, totals), expected)
 

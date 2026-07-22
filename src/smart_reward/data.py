@@ -180,9 +180,7 @@ class CandidateNode:
         expected = {field.name for field in fields(cls)}
         _validate_exact_keys(value, expected, context=cls.__name__)
         payload = dict(value)
-        payload["token_ids"] = _tuple_of_integers(
-            payload["token_ids"], "token_ids", binary=False
-        )
+        payload["token_ids"] = _tuple_of_integers(payload["token_ids"], "token_ids", binary=False)
         payload["response_mask"] = _tuple_of_integers(
             payload["response_mask"], "response_mask", binary=True
         )
@@ -284,9 +282,7 @@ class RepeatedEdgeRecord:
         expected = {field.name for field in fields(cls)}
         _validate_exact_keys(value, expected, context=cls.__name__)
         payload = dict(value)
-        payload["raw_labels"] = _tuple_of_integers(
-            payload["raw_labels"], "raw_labels", binary=True
-        )
+        payload["raw_labels"] = _tuple_of_integers(payload["raw_labels"], "raw_labels", binary=True)
         return cls(**payload)
 
     def to_dict(self) -> dict[str, object]:
@@ -335,8 +331,7 @@ class TrainingEdgeRecord(RepeatedEdgeRecord):
         }
         if leakage:
             raise EvaluationLeakageError(
-                "evaluation-only fields are forbidden in TrainingEdgeRecord: "
-                f"{sorted(leakage)!r}"
+                f"evaluation-only fields are forbidden in TrainingEdgeRecord: {sorted(leakage)!r}"
             )
         # ``slots=True`` dataclasses are rebuilt by the dataclass decorator;
         # spelling out the class avoids CPython's zero-argument ``super``
@@ -430,8 +425,7 @@ def validate_disjoint_prompt_splits(
                 seen[prompt_id] = split_name
         if conflicts:
             details = "; ".join(
-                f"{prior!r} and {split_name!r}: "
-                f"{sorted(repr(item) for item in prompt_ids)}"
+                f"{prior!r} and {split_name!r}: {sorted(repr(item) for item in prompt_ids)}"
                 for prior, prompt_ids in sorted(conflicts.items())
             )
             raise ValueError(f"prompt ids must be disjoint across splits ({details})")

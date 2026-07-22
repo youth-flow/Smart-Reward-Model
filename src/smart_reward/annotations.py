@@ -116,9 +116,10 @@ class RepeatedLabelBatch:
         if int(self.counts.sum().item()) != self.labels.numel():
             raise ValueError("sum(counts) must equal the number of flat labels")
         if self.pair_indices.numel() > 0:
-            if bool((self.pair_indices < 0).any()) or int(
-                self.pair_indices.max()
-            ) >= self.counts.numel():
+            if (
+                bool((self.pair_indices < 0).any())
+                or int(self.pair_indices.max()) >= self.counts.numel()
+            ):
                 raise ValueError("pair_indices contains an out-of-range pair index")
             observed_counts = torch.bincount(
                 self.pair_indices,
@@ -181,9 +182,9 @@ def sample_geometric_repeated_labels(
     if bool(((probabilities < 0.0) | (probabilities > 1.0)).any()):
         raise ValueError("probabilities must lie in [0, 1]")
     if max_total_annotations is not None and (
-            isinstance(max_total_annotations, bool)
-            or not isinstance(max_total_annotations, int)
-            or max_total_annotations < 0
+        isinstance(max_total_annotations, bool)
+        or not isinstance(max_total_annotations, int)
+        or max_total_annotations < 0
     ):
         raise ValueError("max_total_annotations must be a non-negative integer")
 

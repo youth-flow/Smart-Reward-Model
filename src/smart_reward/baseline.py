@@ -19,10 +19,7 @@ def repeated_btl_nll(
     contrast to SRM+, the baseline intentionally weights an edge by ``N_i``.
     """
 
-    if not all(
-        isinstance(value, torch.Tensor)
-        for value in (margins, left_wins, num_annotations)
-    ):
+    if not all(isinstance(value, torch.Tensor) for value in (margins, left_wins, num_annotations)):
         raise TypeError("all inputs must be torch.Tensor objects")
     if margins.ndim != 1 or margins.numel() == 0:
         raise ValueError("margins must be a non-empty one-dimensional tensor")

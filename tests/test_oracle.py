@@ -19,9 +19,7 @@ def test_fit_uses_train_scores_and_transform_is_frozen() -> None:
 
     assert transform.b == pytest.approx(2.0)
     assert transform.tau == pytest.approx(1.4826 * 3.0)
-    expected = (math.log(3.0) / 2.0) * torch.tanh(
-        (held_out_scores - transform.b) / transform.tau
-    )
+    expected = (math.log(3.0) / 2.0) * torch.tanh((held_out_scores - transform.b) / transform.tau)
     torch.testing.assert_close(transform.transform(held_out_scores), expected)
     assert transform.b == pytest.approx(2.0)
     assert transform.tau == pytest.approx(1.4826 * 3.0)
