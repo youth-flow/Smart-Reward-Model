@@ -232,6 +232,59 @@ def _local_annotation_batch(
     return labels_by_edge, wins, totals, h
 
 
+def _reward_class_projection_diagnostic(
+    reward_features: torch.Tensor,
+    true_rewards: torch.Tensor,
+) -> dict[str, float | str]:
+    """Measure train-only misspecification modulo prompt reward gauges.
+
+    A bias-free frozen-feature linear head can only represent rewards through
+    ``features @ weight``.  Policy updates and BTL comparisons are unchanged by
+    adding a prompt-specific constant to every candidate reward, so both the
+    features and targets are centered over candidates before projection.  The
+    solve is deliberately performed on a detached float64 CPU copy: this keeps
+    the diagnostic independent of accelerator kernels and prevents oracle
+    gradients or fitted weights from crossing the artifact boundary.
+    """
+
+    if reward_features.ndim != 3:
+        raise ValueError("reward_features must have shape (P, M, H)")
+    if true_rewards.shape != reward_features.shape[:2]:
+        raise ValueError("true_rewards must have shape (P, M)")
+    if not reward_features.is_floating_point() or not true_rewards.is_floating_point():
+        raise TypeError("projection inputs must have floating-point dtypes")
+    if not bool(torch.isfinite(reward_features).all()) or not bool(
+        torch.isfinite(true_rewards).all()
+    ):
+        raise ValueError("projection inputs must be finite")
+
+    features = reward_features.detach().to(device="cpu", dtype=torch.float64)
+    targets = true_rewards.detach().to(device="cpu", dtype=torch.float64)
+    centered_features = features - features.mean(dim=1, keepdim=True)
+    centered_targets = targets - targets.mean(dim=1, keepdim=True)
+    design = centered_features.reshape(-1, centered_features.shape[-1])
+    target = centered_targets.reshape(-1)
+
+    fitted_weight = torch.linalg.lstsq(design, target).solution
+    residual = design @ fitted_weight - target
+    normalizer = math.sqrt(target.numel())
+    target_centered_rms = torch.linalg.vector_norm(target).item() / normalizer
+    residual_rmse = torch.linalg.vector_norm(residual).item() / normalizer
+    relative_residual = 0.0 if target_centered_rms == 0.0 else residual_rmse / target_centered_rms
+    metrics = (target_centered_rms, residual_rmse, relative_residual)
+    if not all(math.isfinite(value) and value >= 0.0 for value in metrics):
+        raise FloatingPointError("reward-class projection diagnostic is non-finite")
+
+    return {
+        "fit_split": "train",
+        "centering": "per_prompt_candidate_mean",
+        "solver": "float64_cpu_lstsq",
+        "target_centered_rms": target_centered_rms,
+        "residual_rmse": residual_rmse,
+        "relative_residual": relative_residual,
+    }
+
+
 def assemble_controlled_experiment(
     prompt_records: Sequence[PromptRecord],
     policy_scores: torch.Tensor,
@@ -275,6 +328,10 @@ def assemble_controlled_experiment(
         raw_oracle_scores.index_select(0, train_index).reshape(-1)
     )
     true_rewards = transform(raw_oracle_scores)
+    train_reward_class_projection = _reward_class_projection_diagnostic(
+        reward_features.index_select(0, train_index),
+        true_rewards.index_select(0, train_index),
+    )
     margins = true_rewards[:, 0] - true_rewards[:, 1]
     probabilities = btl_probabilities(margins)
 
@@ -377,6 +434,7 @@ def assemble_controlled_experiment(
         "split_sizes": {split: len(split_indices[split]) for split in _SPLITS},
         "oracle_transform": {"b": transform.b, "tau": transform.tau},
         "oracle_fit_split": "train",
+        "train_reward_class_projection": train_reward_class_projection,
         "edge_orientation": {"left_candidate": 0, "right_candidate": 1},
     }
     return Phase1Assembly(

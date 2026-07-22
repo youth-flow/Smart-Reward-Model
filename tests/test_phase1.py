@@ -9,7 +9,11 @@ import torch
 from smart_reward.config import load_config
 from smart_reward.data import repeated_labels_to_h
 from smart_reward.oracle import fit_robust_oracle_transform
-from smart_reward.phase1 import assemble_controlled_experiment, materialize_phase1
+from smart_reward.phase1 import (
+    _reward_class_projection_diagnostic,
+    assemble_controlled_experiment,
+    materialize_phase1,
+)
 from smart_reward.prompts import ChatMessage, PromptRecord
 
 
@@ -75,6 +79,10 @@ def test_assembler_fits_oracle_on_training_nodes_only_and_never_leaks() -> None:
     assert all(not any("oracle" in key for key in edge.to_dict()) for edge in result.training_edges)
 
     expected_rewards = expected_transform(raw_scores)
+    expected_projection = _reward_class_projection_diagnostic(
+        reward_features[[0, 2]], expected_rewards[[0, 2]]
+    )
+    assert result.evidence["train_reward_class_projection"] == expected_projection
     assert torch.equal(
         result.experiment.validation.true_rewards,
         expected_rewards[[1, 4]],
@@ -83,15 +91,58 @@ def test_assembler_fits_oracle_on_training_nodes_only_and_never_leaks() -> None:
 
     changed_heldout = raw_scores.clone()
     changed_heldout[[1, 3, 4, 5]] *= 1_000_000.0
+    changed_heldout_features = reward_features.clone()
+    changed_heldout_features[[1, 3, 4, 5]] *= 1_000_000.0
     changed = assemble_controlled_experiment(
         records,
         policy_scores,
-        reward_features,
+        changed_heldout_features,
         changed_heldout,
         seed=20260722,
     )
     assert changed.oracle_transform == result.oracle_transform
     assert torch.equal(changed.experiment.train.h, result.experiment.train.h)
+    assert (
+        changed.evidence["train_reward_class_projection"]
+        == result.evidence["train_reward_class_projection"]
+    )
+
+
+def test_reward_class_projection_is_prompt_gauge_invariant() -> None:
+    features = torch.tensor(
+        [
+            [[0.0, 1.0], [1.0, 0.0], [2.0, -1.0], [3.0, -2.0]],
+            [[-2.0, 0.0], [-1.0, 2.0], [0.0, 1.0], [2.0, -1.0]],
+        ],
+        dtype=torch.float64,
+    )
+    rewards = torch.tensor(
+        [[-1.0, 0.5, 1.25, 3.0], [4.0, -2.0, 0.0, 1.5]],
+        dtype=torch.float64,
+    )
+    feature_gauge = torch.tensor([[[91.0, -17.0]], [[-8.0, 23.0]]], dtype=torch.float64)
+    reward_gauge = torch.tensor([[1000.0], [-3000.0]], dtype=torch.float64)
+
+    reference = _reward_class_projection_diagnostic(features, rewards)
+    shifted = _reward_class_projection_diagnostic(
+        features + feature_gauge,
+        rewards + reward_gauge,
+    )
+
+    assert set(reference) == {
+        "fit_split",
+        "centering",
+        "solver",
+        "target_centered_rms",
+        "residual_rmse",
+        "relative_residual",
+    }
+    assert reference["fit_split"] == "train"
+    assert reference["centering"] == "per_prompt_candidate_mean"
+    assert reference["solver"] == "float64_cpu_lstsq"
+    for metric in ("target_centered_rms", "residual_rmse", "relative_residual"):
+        assert shifted[metric] == pytest.approx(reference[metric], rel=0.0, abs=1.0e-12)
+    assert 0.0 < float(reference["relative_residual"]) <= 1.0
 
 
 def test_assembler_edges_are_oriented_consistent_and_use_only_zero_vs_one() -> None:
