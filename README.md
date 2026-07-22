@@ -340,7 +340,8 @@ bash scripts/hpc4/submit_controlled.sh configs/main.yaml gpu-l20 "D-HH:MM:SS"
 脚本在容器内强制 `TRANSFORMERS_OFFLINE=1`、`HF_DATASETS_OFFLINE=1`，校验镜像 SHA256，
 显式传递 scheduler 的 GPU visibility；GPU smoke 还硬检恰好一个可见 GPU、容器内 Git、
 Transformers `[4.52.3,5)`、Qwen3 classification class、关键包版本并保存排序后的
-`pip freeze`。controlled smoke 对三个模型阶段分别保存 PyTorch allocated/reserved 峰值。每个 job 隔离到
+`pip check`/`pip freeze`。controlled smoke 对三个模型阶段分别保存 PyTorch
+allocated/reserved 峰值。每个 job 隔离到
 `/scratch/$USER/smart-reward-model/jobs/$SLURM_JOB_ID`；可复用 artifact 和最终 run evidence
 同步到 `/project/sigroup/smart-reward-model`。完整运行规范、目录和故障门槛见
 [docs/hpc4.md](docs/hpc4.md)。

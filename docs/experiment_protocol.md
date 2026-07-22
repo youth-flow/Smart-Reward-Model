@@ -420,7 +420,8 @@ BT 和 SRM+ 三路 candidate-index-aligned records。
 - artifact producer Git/image digest；formal environment 提供该身份时，consumer 必须逐字节
   匹配，不能跨 commit/image 复用；
 - Python、PyTorch、Transformers、PEFT、Datasets、CUDA/cuDNN、GPU 信息；
-- GPU smoke 的 Transformers `[4.52.3,5)` / Qwen3 class 验收和排序后 `pip freeze`；
+- GPU smoke 的 Transformers `[4.52.3,5)` / Qwen3 class 验收、`pip check` 和排序后
+  `pip freeze`；
 - Slurm job/account/partition/node、镜像路径与 SHA256；
 - comparison 与 rollout 绑定的 `run-manifest.json` bytes-level SHA256 与 formal environment
   identity；rollout 还会将当前执行进程与 comparison identity 逐字段匹配；

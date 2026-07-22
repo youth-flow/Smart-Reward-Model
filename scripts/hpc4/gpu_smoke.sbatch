@@ -81,5 +81,7 @@ PY
 
 apptainer exec --cleanenv "${SRM_IMAGE}" git --version | tee -a "${report}"
 
+apptainer exec --cleanenv "${SRM_IMAGE}" python -m pip check | tee -a "${report}"
+
 apptainer exec --cleanenv "${SRM_IMAGE}" python -m pip freeze \
   | sort | tee -a "${report}"

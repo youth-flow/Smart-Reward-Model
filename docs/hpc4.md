@@ -133,6 +133,7 @@ squeue -u "$USER"
 - scheduler visibility 变量被显式传入容器，且 `torch.cuda.is_available()` 为真、GPU count
   **恰好为 1**；
 - 一个实际 CUDA tensor operation；
+- `python -m pip check` 无依赖冲突；
 - 排序后的完整 `python -m pip freeze`。
 
 任一检查失败时 job 非零。无论成功失败，trap 都把报告同步到：
