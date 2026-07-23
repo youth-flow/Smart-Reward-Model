@@ -10,16 +10,17 @@
 保留。公开 CLI 为 `prorm`，公开 environment keys 统一为 `PRORM_*`；旧 `SRM_*` keys 只作为
 迁移期兼容 alias 被脚本接受。
 
-## 0. 从登录到结论的六个门
+## 0. 从登录到结论的七个门
 
 | Gate | 执行动作 | 通过标准 | 失败后 |
 |---|---|---|---|
 | 1. Account | 私密完成 password+Duo/2FA，再运行 `preflight.sh` | account、quota、partition、project/scratch、Apptainer 可用 | 不申请 GPU |
-| 2. Driver + candidate | host probe、committed definition、SIF SHA256、两份 config inventory | driver 已观察；candidate image/cache 身份完整 | 不进入 CUDA smoke |
+| 2. Driver + candidate | host probe、committed definition、SIF SHA256 | driver 已观察；candidate image 身份完整 | 不进入 CUDA smoke |
 | 3. CUDA | `submit_gpu_smoke.sh` | 单 GPU、版本、Qwen3 class、`pip check` 全通过 | 修 image/partition |
-| 4. Model smoke | `submit_controlled.sh configs/smoke.yaml ...` | artifact、BT-MLE/ProRM+、KL、rollout、memory evidence 完整 | 定位实现或容量问题 |
-| 5. Main | 同一环境提交 `configs/main.yaml` | 五个 paired seeds 主链完整 | 保留失败证据后诊断 |
-| 6. Aggregate | `aggregate-results` | 身份一致并写出预注册判据 | 不手改结果 |
+| 4. HF staging | 在 CPU 计算节点严格串行执行 smoke stage、验收、main stage | 两个 stage job 成功并产生 config-specific inventory | 不提交 controlled job |
+| 5. Model smoke | `submit_controlled.sh configs/smoke.yaml ...` | artifact、BT-MLE/ProRM+、KL、rollout、memory evidence 完整 | 定位实现或容量问题 |
+| 6. Main | 同一环境提交 `configs/main.yaml` | 五个 paired seeds 主链完整 | 保留失败证据后诊断 |
+| 7. Aggregate | `aggregate-results` | 身份一致并写出预注册判据 | 不手改结果 |
 
 这些 gate 必须顺序执行。后一个 gate 成功不能补偿前一个 gate 的失败；尤其不能在登录节点
 直接运行模型命令，也不能因为单个 smoke 成功就宣称实验结论成立。
@@ -30,10 +31,13 @@ Gate 2 产生的只是 **candidate image**。只有 Gate 3 在目标 HPC4 partit
 ## 1. 不可违反的原则
 
 - 登录节点只做 Git、quota/partition 检查、文件传输和 `sbatch`；禁止加载模型、提取 score
-  或训练。
+  或训练。登录节点的 user namespace 已确认禁用，因此也禁止在登录节点直接执行
+  `apptainer exec` 或 `stage_hf_assets.py`。
 - 正式实验只使用 SHA256 校验过的 Apptainer `.sif`，不在计算 job 中 `pip install`。
 - model、tokenizer 和 dataset 必须提前缓存 config 指定的 commit revision；正式 job 强制
-  Hugging Face offline。
+  Hugging Face offline。首次下载只能通过 `scripts/hpc4/submit_hf_stage.sh` 提交到
+  `amd` 或 `intel` CPU 计算分区。smoke/main 共用一个 cache，首次 staging 必须严格串行：
+  smoke 报告通过后才可提交 main，禁止并发写 cache。
 - 同一个 paired comparison 固定同一 GPU partition；smoke 后记录实际 GPU 型号，不混用
   不同型号的 seed。
 - 第一阶段是一节点、一 GPU。未获得明确 GPU-hour 预算前，array concurrency 默认 1，
@@ -138,8 +142,11 @@ driver `570.211.01`，`nvidia-smi` 报告最高 CUDA 12.8。该报告固定了
 `sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3`
 锁定。CUDA 12.6 是 PyTorch 2.7.1 的 stable build，并被实测 host driver 支持。
 
-正式模型 smoke 前仍必须得到 hash-frozen **candidate** SIF、完整 environment lock 与
-snapshot-staging record；candidate 是否真正兼容只能由下一节的 GPU smoke 判定。
+image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f` 产生的镜像随后通过 HPC4 GPU
+environment smoke：job `1640778`，validated SIF SHA256 为
+`d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb`。持久化报告路径为
+`$PRORM_PROJECT_ROOT/system-reports/gpu-smoke-1640778.txt`。只有这个精确 SHA256 具有当前
+validated identity；其他构建或传输结果仍是 candidate，必须重新通过 GPU smoke。
 
 首次环境固化必须完成以下闭环：
 
@@ -150,11 +157,13 @@ snapshot-staging record；candidate 是否真正兼容只能由下一节的 GPU 
    definition test 与 `pip check`，再把 raw SIF 作为 ORAS artifact 发布到 GHCR；
 4. 保存 definition Git commit、base/ORAS/SIF 三层 digest、build log、sorted `pip freeze`
    与 image SHA256；
-5. 分别按 `configs/smoke.yaml` 与 `configs/main.yaml` 的固定 revision 预缓存全部 HF assets，
-   保存 config-specific `repo_id/revision/file SHA256` inventory；
-6. 在 `TRANSFORMERS_OFFLINE=1`、`HF_DATASETS_OFFLINE=1` 下验证 snapshot、config、tokenizer 与
-   dataset resolution；这一步不虚称已实例化模型权重；
-7. GPU smoke 以 exit code 0 验证 candidate image 后，才把该 SHA 称为 validated image。
+5. GPU smoke 以 exit code 0 验证 candidate image 后，才把该 SHA 称为 validated image；
+   **已由 job `1640778` 完成**；
+6. 通过 `submit_hf_stage.sh` 在 CPU 计算节点先按 `configs/smoke.yaml` 预缓存全部 HF
+   assets；确认 Slurm 与持久化报告均通过后，再按 `configs/main.yaml` staging，保存两份
+   config-specific `repo_id/revision/file SHA256` inventory；
+7. staging job 在 `TRANSFORMERS_OFFLINE=1`、`HF_DATASETS_OFFLINE=1` 下验证 snapshot、
+   config、tokenizer 与 dataset resolution；这一步不虚称已实例化模型权重。
 
 先提交不依赖容器的 host probe：
 
@@ -168,23 +177,29 @@ squeue -u "$USER"
 `96d3e4e2deaa9eb0948385d6d3a9ea2e81150736b50779c76ba84aec4430ce85`。
 
 HPC4 登录节点不能本地构建 definition：其 Apptainer 没有 SUID builder，subuid/subgid
-为空，user namespaces 被禁用。唯一正式路径是 GitHub Actions root runner 构建 raw SIF，
-以 `oras://ghcr.io/youth-flow/smart-reward-model-hpc4:git-<commit>` 发布，并在 workflow
-中 fail-closed 验证匿名 manifest pull。HPC4 随后按 immutable manifest digest 拉取相同 SIF
-bytes，而不是把 Docker image 重新转换一次。
+为空，而且**登录节点 user namespace 已禁用**。唯一正式构建路径是 GitHub Actions root
+runner 构建 raw SIF，以
+`oras://ghcr.io/youth-flow/smart-reward-model-hpc4:git-<commit>` 发布，并在 workflow 中
+fail-closed 验证匿名 manifest pull。HPC4 随后按 immutable manifest digest 拉取相同 SIF
+bytes，而不是把 Docker image 重新转换一次。相同限制也意味着登录节点不能直接
+`apptainer exec` 完成 HF 下载；该工作必须由下一节的 CPU Slurm staging job 执行。
 
-在远端 checkout 与 image-build commit 一致时执行：
+镜像构建身份与当前运行源码身份必须分离。获取镜像时固定使用已验证的 image-build commit，
+不能用当前 `git rev-parse HEAD` 代替；当前 source `HEAD` 可以包含之后审查通过的 staging
+或 control-plane 修改：
 
 ```bash
 source .env.hpc4
-build_commit="$(git rev-parse HEAD)"
-bash scripts/hpc4/fetch_candidate_image.sh "${build_commit}"
+image_build_commit=b057bc9e134f1844248d655ed0f6c340af03099f
+bash scripts/hpc4/fetch_candidate_image.sh "${image_build_commit}"
 ```
 
 fetcher 先对 GHCR tag 的 OCI manifest bytes 做 SHA256，取得 immutable manifest digest，
 要求 manifest 恰好含一个 SIF layer，再按 digest 拉取。下载后的文件 SHA256 必须等于该
 layer digest；已有不同 `images/prorm.sif` 时拒绝覆盖。base OCI digest、ORAS manifest
-digest 与 SIF SHA256 是三个不同身份，绝不能互换。
+digest 与 SIF SHA256 是三个不同身份，绝不能互换。后续 staging/controlled manifest 绑定
+提交时的 source Git SHA，同时独立绑定 validated SIF SHA256；source SHA 不要求等于上述
+image-build commit。
 
 image/cache 的公开配置值使用相对于 project root 的路径；submit 脚本会 canonicalize 为
 Apptainer 所需的绝对路径，并拒绝 path escape：
@@ -192,9 +207,7 @@ Apptainer 所需的绝对路径，并拒绝 path escape：
 ```bash
 export PRORM_IMAGE=images/prorm.sif
 export PRORM_HF_CACHE=hf-cache
-export PRORM_IMAGE_SHA256="$(
-  sha256sum "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" | awk '{print $1}'
-)"
+export PRORM_IMAGE_SHA256=d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb
 
 test -f "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}"
 mkdir -p "${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
@@ -212,25 +225,69 @@ printf '%s  %s\n' \
 - Qwen policy/reward-feature model 与 tokenizer revision；
 - Skywork oracle model 与 tokenizer revision。
 
-首次 staging 必须对 smoke 与 main 两份 config 分别执行并保存 stdout/stderr。两者当前引用
-相同 repo revision，但各自的 config hash 与 inventory identity 不可互相替代：
+首次 staging 必须对 smoke 与 main 两份 config 分别执行。两者当前引用相同 repo revision
+并共用同一个 cache，但各自的 config hash 与 inventory identity 不可互相替代。登录节点
+只负责执行 `sbatch` 封装脚本；禁止在登录节点直接调用 `apptainer exec` 或
+`stage_hf_assets.py`。选择一个允许计算节点访问公共 Hugging Face 的 CPU 分区，当前脚本
+只接受 `amd` 或 `intel`。默认 staging walltime 为 `04:00:00`；只有管理员强制的 partition
+上限更低时，才改为获批的更低值。
+
+先只提交 smoke stage：
 
 ```bash
 set -euo pipefail
-repo_root="$(pwd -P)"
-image_path="${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}"
-cache_root="${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
-set -o pipefail
-for config in configs/smoke.yaml configs/main.yaml; do
-  stem="$(basename "${config}" .yaml)"
-  apptainer exec --cleanenv \
-    --bind "${repo_root}:${repo_root},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}" \
-    --env "PYTHONPATH=${repo_root}/src" \
-    "${image_path}" \
-    python scripts/hpc4/stage_hf_assets.py "${config}" "${cache_root}" \
-    2>&1 | tee "${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${stem}.log"
-done
-sha256sum "${cache_root}"/inventories/*.json
+export PRORM_HF_STAGE_WALLTIME=04:00:00
+
+smoke_stage_job="$(
+  bash scripts/hpc4/submit_hf_stage.sh \
+    configs/smoke.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
+)"
+smoke_stage_job="${smoke_stage_job%%;*}"
+test -n "${smoke_stage_job}"
+squeue -j "${smoke_stage_job}"
+```
+
+`submit_hf_stage.sh` 要求 clean Git checkout、已校验的 validated SIF SHA 和 project/scratch
+路径。每个 job 在 `$PRORM_SCRATCH_ROOT/jobs/$SLURM_JOB_ID` 建立 submitted commit 的 detached
+source，在 CPU 计算节点中运行容器，并把不可覆盖的报告持久化到：
+
+```text
+$PRORM_PROJECT_ROOT/system-reports/hf-stage-<job-id>.log
+```
+
+smoke stage 离开队列后，必须先确认它为 Slurm `COMPLETED`、`ExitCode=0:0`，且持久化
+报告包含独立一行 `status=passed`：
+
+```bash
+sacct -j "${smoke_stage_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition
+smoke_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${smoke_stage_job}.log"
+tail -n 20 "${smoke_stage_report}"
+grep -Fx 'status=passed' "${smoke_stage_report}"
+```
+
+只有上述三项全部通过，才提交 main stage：
+
+```bash
+main_stage_job="$(
+  bash scripts/hpc4/submit_hf_stage.sh \
+    configs/main.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
+)"
+main_stage_job="${main_stage_job%%;*}"
+test -n "${main_stage_job}"
+squeue -j "${main_stage_job}"
+```
+
+main stage 离开队列后执行同样的验收；只有 `COMPLETED`、`ExitCode=0:0` 和
+`status=passed` 全部成立，才接受两份 inventories：
+
+```bash
+sacct -j "${main_stage_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition
+main_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${main_stage_job}.log"
+tail -n 20 "${main_stage_report}"
+grep -Fx 'status=passed' "${main_stage_report}"
+sha256sum "${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"/inventories/*.json
 ```
 
 该工具的 JSON inventory 只含 cache-relative POSIX path、每个 snapshot 文件 SHA256、
@@ -238,21 +295,9 @@ package versions 和 offline-resolution evidence。它会 local-only resolve mod
 `AutoConfig`、tokenizer 与 MultiPref dataset；不会加载 Qwen/Skywork weight tensors。真正的
 weight/class/显存验证属于 controlled model smoke。
 
-再次审计现有 cache 使用 `--verify-only`；该模式禁止网络、重算内容并要求 bytes 与现有
-inventory 一致，不覆盖正式 inventory：
-
-```bash
-for config in configs/smoke.yaml configs/main.yaml; do
-  stem="$(basename "${config}" .yaml)"
-  apptainer exec --cleanenv \
-    --bind "${repo_root}:${repo_root},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}" \
-    --env "PYTHONPATH=${repo_root}/src" \
-    "${image_path}" \
-    python scripts/hpc4/stage_hf_assets.py \
-    "${config}" "${cache_root}" --verify-only \
-    2>&1 | tee "${PRORM_PROJECT_ROOT}/system-reports/hf-verify-${stem}.log"
-done
-```
+不要在登录节点手工执行 `--verify-only`。`submit_controlled.sh` 选定 config-specific
+inventory 后，compute job 会在 materialization 前自动运行无网络 `--verify-only`，重算内容
+并要求 bytes 与已存在 inventory 完全一致；验证失败会硬停止，不会覆盖正式 inventory。
 
 `submit_controlled.sh` 根据 config hash 固定选择
 `$PRORM_HF_CACHE/inventories/<config-hash>.json`，校验其 SHA256，并把绝对 inventory path 与
@@ -281,7 +326,7 @@ pip 不重装）、`transformers==4.52.3`、`peft==0.15.2`、`accelerate==1.7.0`
 完整实际安装集由 build 与 GPU smoke 各自保存 sorted `pip freeze --all`；最终运行身份是
 SIF SHA256，不宣称 `apt` mirror 能在任意未来时刻重建 bit-identical 文件。
 
-Gate 4 前至少要能定位以下证据：
+Gate 5（controlled model smoke）前至少要能定位以下证据：
 
 | 证据 | 持久化位置 |
 |---|---|
@@ -327,11 +372,23 @@ squeue -u "$USER"
 $PRORM_PROJECT_ROOT/system-reports/gpu-smoke-<job-id>.txt
 ```
 
-只有 Slurm state 为 `COMPLETED`、exit code 0 且报告中的全部检查完成，该 image SHA 才成为
-validated identity，才能进入真实模型 smoke。GPU smoke 只验证 runtime/class，不加载模型
-权重；下一 gate 才首次实例化 Qwen/Skywork。
+正式 GPU smoke job `1640778` 已满足 Slurm `COMPLETED`、exit code 0 与全部报告检查，验证的
+SIF SHA256 是
+`d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb`。这只关闭 Gate 3：
+GPU smoke 验证 runtime/class，不加载模型权重，也不产生 HF cache inventory。Gate 4 的两个
+CPU staging job 完成后，Gate 5 才首次实例化 Qwen/Skywork。任何不同 SHA 的镜像都必须重新
+执行本节，不得继承 job `1640778` 的 validated 身份。
 
 ## 6. Controlled job 提交
+
+`submit_controlled.sh` 的前置条件是：精确 validated SIF、smoke/main 两个 CPU staging job
+均成功、当前 config 对应的 inventory 已存在且 SHA256 可验证。缺少任一条件都必须返回
+Gate 4；不得让 controlled GPU allocation 临时下载或重建 cache。
+
+提交时的 clean source `HEAD` 是本次运行的源码身份，可以晚于 image-build commit
+`b057bc9e134f1844248d655ed0f6c340af03099f`。run manifest 分别保存 source Git SHA 与
+validated SIF SHA256，禁止把二者相等作为前置条件，也禁止用 source `HEAD` 重新推导镜像
+身份。
 
 接口严格要求三个位置参数：
 

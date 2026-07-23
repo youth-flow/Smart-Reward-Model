@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from pathlib import Path
+
+from smart_reward.config import config_hash, load_config
 
 ROOT = Path(__file__).parents[1]
 BASE_DIGEST = "sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3"
@@ -58,3 +62,46 @@ def test_image_workflow_publishes_raw_sif_and_checks_public_access() -> None:
     assert "oras://${GHCR_PACKAGE}:${tag}" in workflow
     assert "Prove anonymous GHCR pull authorization" in workflow
     assert "sif_sha256" in workflow
+
+
+def test_tracked_config_identities_match_exact_bytes_and_semantics() -> None:
+    identity_path = ROOT / "configs" / "identities.json"
+    payload = json.loads(identity_path.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == "prorm-config-identities/v1"
+    assert set(payload["configs"]) == {"configs/main.yaml", "configs/smoke.yaml"}
+    for relative, entry in payload["configs"].items():
+        path = ROOT / relative
+        config = load_config(path)
+        run = config["run"]
+        expected_seed_count = 1 if "seed" in run else len(run["seeds"])
+        assert entry == {
+            "config_hash": config_hash(config),
+            "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "seed_count": expected_seed_count,
+        }
+
+
+def test_hpc4_staging_and_submission_do_not_execute_images_on_login() -> None:
+    stage_submit = (ROOT / "scripts" / "hpc4" / "submit_hf_stage.sh").read_text(encoding="utf-8")
+    controlled_submit = (ROOT / "scripts" / "hpc4" / "submit_controlled.sh").read_text(
+        encoding="utf-8"
+    )
+    stage_job = (ROOT / "scripts" / "hpc4" / "hf_stage.sbatch").read_text(encoding="utf-8")
+    controlled_job = (ROOT / "scripts" / "hpc4" / "controlled.sbatch").read_text(encoding="utf-8")
+
+    assert "apptainer exec" not in stage_submit
+    assert "apptainer exec" not in controlled_submit
+    for submit_script in (stage_submit, controlled_submit):
+        assert 'identity_relative="configs/identities.json"' in submit_script
+        assert "python3 -I -S -" in submit_script
+        assert '"cat-file", "blob"' in submit_script
+        assert '--export="ALL,' not in submit_script
+    assert "apptainer exec --cleanenv" in stage_job
+    assert "--no-mount home,cwd" in stage_job
+    assert "PRORM_CONFIG_HASH" in stage_job
+    assert "stage result inventory_sha256 is invalid" in stage_job
+    assert "another Hugging Face staging job is writing the shared cache" in stage_job
+    assert "--no-mount home,cwd" in controlled_job
+    assert "PRORM_IMAGE escaped PRORM_PROJECT_ROOT" in controlled_job
+    assert "PRORM_HF_CACHE escaped PRORM_PROJECT_ROOT" in controlled_job

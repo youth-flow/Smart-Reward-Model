@@ -88,12 +88,10 @@ resolve_project_path() {
   if ! resolved="$(realpath -e -- "${candidate}")"; then
     die "${canonical} does not exist or cannot be resolved: ${candidate}"
   fi
-  if [[ "${raw}" != /* ]]; then
-    case "${resolved}" in
-      "${PRORM_PROJECT_ROOT}"|"${PRORM_PROJECT_ROOT}"/*) ;;
-      *) die "${canonical} relative path escapes PRORM_PROJECT_ROOT: ${raw}" ;;
-    esac
-  fi
+  case "${resolved}" in
+    "${PRORM_PROJECT_ROOT}"/*) ;;
+    *) die "${canonical} must remain inside PRORM_PROJECT_ROOT: ${raw}" ;;
+  esac
   case "${kind}" in
     file) [[ -f "${resolved}" ]] || die "${canonical} is not a file: ${resolved}" ;;
     directory) [[ -d "${resolved}" ]] || die "${canonical} is not a directory: ${resolved}" ;;
@@ -165,21 +163,82 @@ if ! printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
   die "PRORM_IMAGE_SHA256 does not match PRORM_IMAGE: ${PRORM_IMAGE}"
 fi
 
-mapfile -t config_info < <({
-  apptainer exec --cleanenv \
-    --bind "${repo_root}:${repo_root}" \
-    --env "PYTHONPATH=${repo_root}/src" \
-    "${PRORM_IMAGE}" python - "${config}" <<'PY'
+identity_relative="configs/identities.json"
+command -v python3 >/dev/null 2>&1 || die "python3 is required to read config identities"
+config_worktree_sha256="$(sha256sum -- "${config}" | awk '{print $1}')"
+mapfile -t config_info < <(
+  python3 -I -S - \
+    "${repo_root}" "${git_commit}" "${identity_relative}" \
+    "${config_relative}" "${config_worktree_sha256}" <<'PY'
+import hashlib
+import json
+import re
+import subprocess
 import sys
-from smart_reward.config import config_hash, load_config
 
-config = load_config(sys.argv[1])
-run = config["run"]
-print(1 if "seed" in run else len(run["seeds"]))
-print(config_hash(config))
+
+repo_root, commit, identity_relative, config_relative, worktree_sha256 = sys.argv[1:]
+
+
+def committed_blob(relative):
+    result = subprocess.run(
+        ["git", "-C", repo_root, "cat-file", "blob", f"{commit}:{relative}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise SystemExit(f"cannot read committed blob {relative}: {message}")
+    return result.stdout
+
+
+def reject_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+config_bytes = committed_blob(config_relative)
+config_file_sha256 = hashlib.sha256(config_bytes).hexdigest()
+if config_file_sha256 != worktree_sha256:
+    raise SystemExit("worktree config bytes do not match submitted Git commit")
+raw = committed_blob(identity_relative)
+payload = json.loads(
+    raw.decode("utf-8"),
+    object_pairs_hook=reject_duplicates,
+    parse_constant=lambda value: (_ for _ in ()).throw(
+        ValueError(f"non-finite JSON constant: {value}")
+    ),
+)
+if payload.get("schema_version") != "prorm-config-identities/v1":
+    raise SystemExit("unsupported config identity schema")
+configs = payload.get("configs")
+if not isinstance(configs, dict) or config_relative not in configs:
+    raise SystemExit(f"config is absent from identity file: {config_relative}")
+entry = configs[config_relative]
+if not isinstance(entry, dict) or set(entry) != {
+    "config_hash",
+    "file_sha256",
+    "seed_count",
+}:
+    raise SystemExit("invalid config identity entry")
+if entry["file_sha256"] != config_file_sha256:
+    raise SystemExit("committed config bytes do not match the committed identity")
+if not isinstance(entry["seed_count"], int) or entry["seed_count"] <= 0:
+    raise SystemExit("invalid identity seed_count")
+if not isinstance(entry["config_hash"], str) or not re.fullmatch(
+    r"[0-9a-f]{64}", entry["config_hash"]
+):
+    raise SystemExit("invalid semantic config hash")
+print(entry["seed_count"])
+print(entry["config_hash"])
 PY
-})
-[[ "${#config_info[@]}" -eq 2 ]] || die "failed to resolve config identity in the container"
+)
+[[ "${#config_info[@]}" -eq 2 ]] || die "failed to resolve tracked config identity"
 seed_count="${config_info[0]}"
 config_sha="${config_info[1]}"
 [[ "${seed_count}" =~ ^[1-9][0-9]*$ ]] || { echo "invalid configured seed count" >&2; exit 2; }
@@ -261,10 +320,11 @@ done
 slurm_log_dir="${PRORM_PROJECT_ROOT}/slurm-logs"
 mkdir -p "${slurm_log_dir}"
 sbatch \
+  --parsable \
   --chdir="${repo_root}" \
   --partition="${partition}" \
   --time="${walltime}" \
   --array="0-$((seed_count - 1))%${concurrency}" \
   --output="${slurm_log_dir}/%x-%A_%a.out" \
-  --export="ALL,PRORM_PROJECT_ROOT=${PRORM_PROJECT_ROOT},PRORM_SCRATCH_ROOT=${PRORM_SCRATCH_ROOT},PRORM_IMAGE=${PRORM_IMAGE},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_CONFIG=${config},PRORM_HF_CACHE=${PRORM_HF_CACHE},PRORM_REPO_ROOT=${repo_root},PRORM_GIT_COMMIT=${git_commit},PRORM_HF_INVENTORY=${PRORM_HF_INVENTORY},PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256},SRM_PROJECT_ROOT=${SRM_PROJECT_ROOT},SRM_SCRATCH_ROOT=${SRM_SCRATCH_ROOT},SRM_IMAGE=${SRM_IMAGE},SRM_IMAGE_SHA256=${SRM_IMAGE_SHA256},SRM_CONFIG=${config},SRM_HF_CACHE=${SRM_HF_CACHE},SRM_REPO_ROOT=${repo_root},SRM_GIT_COMMIT=${git_commit},SRM_HF_INVENTORY=${SRM_HF_INVENTORY},SRM_HF_INVENTORY_SHA256=${SRM_HF_INVENTORY_SHA256}" \
+  --export="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${PRORM_PROJECT_ROOT},PRORM_SCRATCH_ROOT=${PRORM_SCRATCH_ROOT},PRORM_IMAGE=${PRORM_IMAGE},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_CONFIG=${config},PRORM_HF_CACHE=${PRORM_HF_CACHE},PRORM_REPO_ROOT=${repo_root},PRORM_GIT_COMMIT=${git_commit},PRORM_HF_INVENTORY=${PRORM_HF_INVENTORY},PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256},SRM_PROJECT_ROOT=${SRM_PROJECT_ROOT},SRM_SCRATCH_ROOT=${SRM_SCRATCH_ROOT},SRM_IMAGE=${SRM_IMAGE},SRM_IMAGE_SHA256=${SRM_IMAGE_SHA256},SRM_CONFIG=${config},SRM_HF_CACHE=${SRM_HF_CACHE},SRM_REPO_ROOT=${repo_root},SRM_GIT_COMMIT=${git_commit},SRM_HF_INVENTORY=${SRM_HF_INVENTORY},SRM_HF_INVENTORY_SHA256=${SRM_HF_INVENTORY_SHA256}" \
   "${repo_root}/scripts/hpc4/controlled.sbatch"

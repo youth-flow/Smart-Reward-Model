@@ -1,0 +1,15 @@
+{
+  "configs": {
+    "configs/main.yaml": {
+      "config_hash": "aa2a6a075ee52423e7660e14f87efcf89525a9fe5cf2f5bac991477cfeca2481",
+      "file_sha256": "9be3437cf8180234c5cbd8a871e28af0f18e600970c657ef529be384db31c8ad",
+      "seed_count": 5
+    },
+    "configs/smoke.yaml": {
+      "config_hash": "63bf137288471445729922846b25a0b410cd4a82a659107ed0c697f99b933ef3",
+      "file_sha256": "7cec069bbb3590cf0c1beee0600255d70307ce04ea31cd303de86f4c8e16848b",
+      "seed_count": 1
+    }
+  },
+  "schema_version": "prorm-config-identities/v1"
+}

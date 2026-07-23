@@ -465,7 +465,8 @@ def _local_snapshot_error(
 ) -> RuntimeError:
     return RuntimeError(
         f"pinned {kind} snapshot is unavailable from the local cache: "
-        f"{identifier}@{revision}. Pre-stage this exact revision on the HPC login node; "
+        f"{identifier}@{revision}. Pre-stage this exact revision with the HPC4 "
+        "Slurm staging job; "
         "formal compute-node runs must not download from the network."
     )
 

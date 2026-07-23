@@ -37,9 +37,10 @@ method terminology is ProRM/ProRM+.
 | Automated test suite | Implemented; synthetic runs validate the pipeline, not an effect claim |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
-| Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 candidate |
-| HPC4-validated `.sif`, environment lock and offline Hugging Face cache | **Not yet frozen** |
-| Pinned Qwen/Skywork GPU smoke and five-seed main experiment | **Not yet run** |
+| Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
+| HPC4 GPU environment smoke | **Passed**, job `1640778`; image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f`; validated SIF SHA256 `d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb` |
+| Offline Hugging Face cache and config-specific inventories | Separate required gate; stage on a CPU compute node with `submit_hf_stage.sh` |
+| Pinned Qwen/Skywork controlled model smoke and five-seed main experiment | **Not yet run** |
 | “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
 
 The code and control plane are ready for environment closure and controlled execution. The repository does
@@ -346,47 +347,80 @@ PyTorch 2.7.1/CUDA 12.6 definition in
 [`containers/prorm-hpc4.def`](containers/prorm-hpc4.def), with the exact Python package lock in
 [`containers/requirements-hpc4.lock`](containers/requirements-hpc4.lock).
 
-HPC4 cannot build the definition locally because its Apptainer installation has no SUID builder,
-subuid/subgid mapping or user namespaces. The dedicated GitHub workflow builds the raw SIF, records
-build evidence and publishes it through public GHCR ORAS. Pull the artifact by the build commit; the
-fetcher resolves and verifies the OCI manifest digest and requires the local SIF SHA256 to equal the
-manifest's SIF-layer digest:
+HPC4 cannot build the definition locally because its Apptainer installation has no SUID builder or
+subuid/subgid mapping, and user namespaces are disabled on the login node. The login node is therefore
+limited to Git, file checks and Slurm submission; it must not run `apptainer exec` for HF staging. The
+dedicated GitHub workflow builds the raw SIF, records build evidence and publishes it through public
+GHCR ORAS. Pull the validated artifact by its immutable **image-build commit**, not by the current source
+`HEAD`; the source checkout may legitimately contain later staging/control-plane changes. The fetcher
+resolves and verifies the OCI manifest digest and requires the local SIF SHA256 to equal the manifest's
+SIF-layer digest:
 
 ```bash
-git_commit="$(git rev-parse HEAD)"
-bash scripts/hpc4/fetch_candidate_image.sh "${git_commit}"
+image_build_commit=b057bc9e134f1844248d655ed0f6c340af03099f
+bash scripts/hpc4/fetch_candidate_image.sh "${image_build_commit}"
 
 export PRORM_IMAGE=images/prorm.sif
 export PRORM_HF_CACHE=hf-cache
-export PRORM_IMAGE_SHA256="$(
-  sha256sum "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" | awk '{print $1}'
-)"
+export PRORM_IMAGE_SHA256=d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb
 printf '%s  %s\n' \
   "${PRORM_IMAGE_SHA256}" "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" \
   | sha256sum --check
 ```
 
-The downloaded SIF is still only a **candidate**. Stage both locked configs and preserve their logs:
+This exact SIF passed the HPC4 GPU environment smoke in job `1640778`; its persistent report is
+`$PRORM_PROJECT_ROOT/system-reports/gpu-smoke-1640778.txt`. A file with any other SHA256 remains an
+unvalidated candidate.
+
+HF model and dataset staging is a separate, mandatory gate. Because login-node user namespaces are
+disabled, do not run `stage_hf_assets.py` or `apptainer exec` directly there. The two configs share one
+HF cache, so their first downloads must be serialized on an allowed CPU compute partition (`amd` or
+`intel`). Submit the smoke stage first:
 
 ```bash
-
-repo_root="$(pwd -P)"
+export PRORM_HF_STAGE_WALLTIME=04:00:00
 cache_root="${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
-image_path="${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}"
-set -o pipefail
-for config in configs/smoke.yaml configs/main.yaml; do
-  stem="$(basename "${config}" .yaml)"
-  apptainer exec --cleanenv \
-    --bind "${repo_root}:${repo_root},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}" \
-    --env "PYTHONPATH=${repo_root}/src" \
-    "${image_path}" \
-    python scripts/hpc4/stage_hf_assets.py "${config}" "${cache_root}" \
-    2>&1 | tee "${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${stem}.log"
-done
-sha256sum "${cache_root}"/inventories/*.json
-
-bash scripts/hpc4/submit_gpu_smoke.sh gpu-l20
+smoke_stage_job="$(
+  bash scripts/hpc4/submit_hf_stage.sh \
+    configs/smoke.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
+)"
+smoke_stage_job="${smoke_stage_job%%;*}"
+test -n "${smoke_stage_job}"
+squeue -j "${smoke_stage_job}"
 ```
+
+After the smoke stage leaves the queue, require `COMPLETED`, `ExitCode=0:0` and an exact
+`status=passed` report before submitting the main stage:
+
+```bash
+sacct -j "${smoke_stage_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition
+smoke_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${smoke_stage_job}.log"
+tail -n 20 "${smoke_stage_report}"
+grep -Fx 'status=passed' "${smoke_stage_report}"
+
+main_stage_job="$(
+  bash scripts/hpc4/submit_hf_stage.sh \
+    configs/main.yaml amd "${PRORM_HF_STAGE_WALLTIME}"
+)"
+main_stage_job="${main_stage_job%%;*}"
+test -n "${main_stage_job}"
+squeue -j "${main_stage_job}"
+```
+
+After the main stage leaves the queue, apply the same acceptance check:
+
+```bash
+sacct -j "${main_stage_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition
+main_stage_report="${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${main_stage_job}.log"
+tail -n 20 "${main_stage_report}"
+grep -Fx 'status=passed' "${main_stage_report}"
+sha256sum "${cache_root}"/inventories/*.json
+```
+
+`04:00:00` is the staging default. Change it only if an administrator-enforced partition limit requires
+an approved lower value.
 
 Staging downloads only the public pinned snapshots. Its offline proof resolves snapshot revisions,
 configs, tokenizers and the MultiPref dataset; it does not claim to have instantiated model weights.
@@ -394,8 +428,9 @@ Actual Qwen/Skywork weight loading is tested by the controlled model smoke. Each
 digest is reverified offline and bound into the run manifest, artifact producer identity and final
 aggregate.
 
-Only after the GPU smoke is `COMPLETED` with `ExitCode=0:0`, its report contains every required check, the
-Git checkout is clean and `HEAD` equals the reviewed remote commit may the model jobs start:
+Only after the validated-image GPU smoke has passed, both CPU staging jobs are `COMPLETED` with
+`ExitCode=0:0`, both config-specific inventories exist, the Git checkout is clean and `HEAD` equals the
+reviewed remote commit may `submit_controlled.sh` be used:
 
 ```bash
 git fetch origin main
@@ -414,8 +449,10 @@ bash scripts/hpc4/submit_controlled.sh \
 ```
 
 Formal jobs never use `--allow-download`. They bind the submission Git commit and config-specific cache
-inventory before allocation work begins. Wall time, GPU-hours and storage budgets come from the accepted
-smoke record. The five-seed aggregate must be produced inside the same image under
+inventory before allocation work begins. The run manifest records that **source Git SHA** separately from
+the validated **SIF SHA256**; it does not require the source commit to equal image-build commit
+`b057bc9e134f1844248d655ed0f6c340af03099f`. Wall time, GPU-hours and storage budgets come from the
+accepted smoke record. The five-seed aggregate must be produced inside the same image under
 `$PRORM_PROJECT_ROOT/runs`, not in the Git checkout. See [hpc4.md](docs/hpc4.md) for the exact validation,
 aggregation and scratch-retention commands.
 

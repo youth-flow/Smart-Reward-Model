@@ -101,6 +101,13 @@ resolve_compat_env PRORM_HF_INVENTORY_SHA256 SRM_HF_INVENTORY_SHA256
 [[ "${SLURM_JOB_ID}" =~ ^[1-9][0-9]*$ ]] || {
   die "SLURM_JOB_ID must be a positive integer"
 }
+[[ "${SLURM_JOB_ACCOUNT:-}" == "sigroup" ]] || {
+  die "formal controlled run requires Slurm account sigroup"
+}
+case "${SLURM_JOB_PARTITION:-}" in
+  gpu-a30|gpu-l20|gpu-rtx5880|gpu-rtx4090d) ;;
+  *) die "formal controlled run is on an unsupported GPU partition" ;;
+esac
 reject_apptainer_control_environment
 
 normalize_absolute_root PRORM_PROJECT_ROOT SRM_PROJECT_ROOT
@@ -118,6 +125,22 @@ done
 }
 [[ -d "${PRORM_HF_CACHE}" ]] || die "PRORM_HF_CACHE is not a directory: ${PRORM_HF_CACHE}"
 [[ -r "${PRORM_HF_CACHE}" ]] || die "PRORM_HF_CACHE is not readable: ${PRORM_HF_CACHE}"
+image_canonical="$(realpath -e -- "${PRORM_IMAGE}")" \
+  || die "PRORM_IMAGE cannot be resolved"
+cache_canonical="$(realpath -e -- "${PRORM_HF_CACHE}")" \
+  || die "PRORM_HF_CACHE cannot be resolved"
+[[ "${image_canonical}" == "${PRORM_IMAGE}" ]] \
+  || die "PRORM_IMAGE must be canonical"
+[[ "${cache_canonical}" == "${PRORM_HF_CACHE}" ]] \
+  || die "PRORM_HF_CACHE must be canonical"
+case "${PRORM_IMAGE}" in
+  "${PRORM_PROJECT_ROOT}"/*) ;;
+  *) die "PRORM_IMAGE escaped PRORM_PROJECT_ROOT" ;;
+esac
+case "${PRORM_HF_CACHE}" in
+  "${PRORM_PROJECT_ROOT}"/*) ;;
+  *) die "PRORM_HF_CACHE escaped PRORM_PROJECT_ROOT" ;;
+esac
 [[ "${PRORM_REPO_ROOT}" = /* ]] || die "PRORM_REPO_ROOT must be absolute"
 [[ -d "${PRORM_REPO_ROOT}/.git" ]] || {
   die "PRORM_REPO_ROOT is not a Git worktree root: ${PRORM_REPO_ROOT}"
@@ -208,16 +231,24 @@ assert_execution_checkout() {
 }
 assert_execution_checkout
 
+mkdir "${job_dir}/home"
 container=(
   apptainer exec --cleanenv --nv
+  --no-mount home,cwd
+  --pwd "${repo_root}"
   --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}"
+  --env "HOME=${job_dir}/home"
   --env "PYTHONPATH=${repo_root}/src"
+  --env "PYTHONNOUSERSITE=1"
+  --env "PYTHONDONTWRITEBYTECODE=1"
   --env "HF_HOME=${PRORM_HF_CACHE}"
   --env "HF_HUB_CACHE=${PRORM_HF_CACHE}/hub"
   --env "HF_DATASETS_CACHE=${PRORM_HF_CACHE}/datasets"
   --env "HF_HUB_OFFLINE=1"
   --env "TRANSFORMERS_OFFLINE=1"
   --env "HF_DATASETS_OFFLINE=1"
+  --env "HF_HUB_DISABLE_TELEMETRY=1"
+  --env "TOKENIZERS_PARALLELISM=false"
 )
 
 # --cleanenv is deliberate; pass only the reproducibility allowlist consumed
