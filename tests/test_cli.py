@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +41,33 @@ def test_formal_execution_is_explicit_not_implied_by_local_cuda_visibility(
 
     monkeypatch.setenv("SLURM_JOB_ID", "230642")
     assert cli_module._formal_execution_requested() is True
+
+
+def test_cuda_memory_tracking_initializes_context_before_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    def initialize() -> None:
+        events.append("init")
+
+    def reset(device: int) -> None:
+        assert events == ["init"]
+        assert device == 0
+        events.append("reset")
+
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            device_count=lambda: 1,
+            init=initialize,
+            reset_peak_memory_stats=reset,
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    assert cli_module._start_cuda_memory_tracking() is fake_torch
+    assert events == ["init", "reset"]
 
 
 def test_formal_manifest_requires_hf_inventory_digest(tmp_path: Path) -> None:

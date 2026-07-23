@@ -238,6 +238,10 @@ def _start_cuda_memory_tracking() -> ModuleType:
     torch = importlib.import_module("torch")
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         raise RuntimeError("PRORM_MEMORY_REPORT requires exactly one visible CUDA GPU")
+    # reset_peak_memory_stats does not reliably trigger lazy CUDA
+    # initialization itself.  On HPC4's PyTorch/CUDA stack it otherwise
+    # raises ``RuntimeError: Invalid device argument`` in a fresh process.
+    torch.cuda.init()
     torch.cuda.reset_peak_memory_stats(0)
     return torch
 
