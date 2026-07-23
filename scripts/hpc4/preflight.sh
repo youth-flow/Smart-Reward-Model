@@ -61,6 +61,12 @@ normalize_absolute_root PRORM_SCRATCH_ROOT SRM_SCRATCH_ROOT
 roots_overlap "${PRORM_PROJECT_ROOT}" "${PRORM_SCRATCH_ROOT}" \
   && die "PRORM_PROJECT_ROOT and PRORM_SCRATCH_ROOT may not be equal or nested"
 
+for required_command in \
+  id squota sinfo squeue scontrol sacctmgr realpath df apptainer; do
+  command -v "${required_command}" >/dev/null 2>&1 \
+    || die "required HPC4 command is unavailable: ${required_command}"
+done
+
 echo "== identity =="
 id
 
@@ -69,9 +75,20 @@ squota
 squota -A "${account}"
 
 echo "== scheduler =="
-savail
-squeue -u "${USER}"
+sinfo -h -o '%P|%a|%l|%G|%D|%t'
+squeue -u "${USER}" -o '%.18i %.12P %.32j %.10T %.10M %.6D %R'
 scontrol show partition
+association_records="$(
+  sacctmgr -n -P show assoc \
+    user="${USER}" account="${account}" \
+    format=User,Account,Partition,QOS
+)"
+printf '%s\n' "${association_records}"
+[[ -n "${association_records}" ]] \
+  || die "no Slurm association found for ${USER}/${account}"
+printf '%s\n' "${association_records}" \
+  | grep -Eq '\|sigroup\|gpu-(a30|l20|rtx4090d|rtx5880)\|' \
+  || die "${USER}/${account} has no supported HPC4 GPU partition association"
 
 echo "== storage =="
 [[ -w "${PRORM_PROJECT_ROOT}" ]] || {

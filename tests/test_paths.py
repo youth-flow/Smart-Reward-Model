@@ -48,3 +48,12 @@ def test_persisted_hpc_reports_do_not_dump_absolute_runtime_paths() -> None:
     ):
         assert forbidden not in combined_reports
     assert "SLURM_SUBMIT_DIR" not in controlled
+
+
+def test_preflight_uses_commands_available_on_hpc4() -> None:
+    preflight = (ROOT / "scripts" / "hpc4" / "preflight.sh").read_text(encoding="utf-8")
+
+    assert "savail" not in preflight
+    for required in ("sinfo", "squeue", "scontrol", "sacctmgr"):
+        assert f" {required}" in preflight
+    assert "has no supported HPC4 GPU partition association" in preflight
