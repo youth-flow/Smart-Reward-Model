@@ -34,7 +34,8 @@ method terminology is ProRM/ProRM+.
 |---|---|
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
 | Automated test suite | Implemented; synthetic runs validate the pipeline, not an effect claim |
-| Slurm/Apptainer control plane | Implemented |
+| Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
+| Driver-selected image definition/build | Pending the first HPC4 host probe; no generic image is claimed |
 | HPC4-validated `.sif`, environment lock and offline Hugging Face cache | **Not yet frozen** |
 | Pinned Qwen/Skywork GPU smoke and five-seed main experiment | **Not yet run** |
 | “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
@@ -199,6 +200,12 @@ The target `r*` in Phase 1 is a train-calibrated transformation of frozen Skywor
 **operational oracle**, not human utility. BT-MLE and ProRM+ share candidates, repeated labels, features,
 zero initialization, optimizer, step count, GPU and stopping rule; only the training objective changes.
 
+MultiPref supplies **prompts only** in this controlled experiment; its historical human preference labels
+are not training targets. Qwen generates the four candidate responses. For canonical candidate pair
+`0-1`, frozen Skywork defines $p^*=\sigma(\Delta r^*)$; a named seed then generates conditionally iid
+Bernoulli repeats and the randomized estimator `h`. Thus the Phase-1 “annotator” is a reproducible
+Skywork-defined BTL simulator, not a new human-labeling round.
+
 ```text
 MultiPref prompts
     -> pi_0: four exact-token candidates per prompt
@@ -287,30 +294,114 @@ remain compatibility surfaces while artifacts and scripts migrate.
 
 ## 7. HKUST HPC4 entry
 
-The remaining environment blocker is concrete: a driver-compatible Apptainer definition, `.sif` SHA256,
-`pip freeze` and pinned offline Hugging Face cache must be validated on HPC4 before model smoke or a main
-array can be accepted. The repository does not guess an untested CUDA base image.
+Repository inputs are relative to the checkout. Only the cross-node project and scratch anchors must be
+absolute:
+
+| Content | Persistent or temporary location |
+|---|---|
+| Git checkout | `$HOME/Smart-Reward-Model` |
+| Qwen, Skywork and raw MultiPref snapshots | `$PRORM_PROJECT_ROOT/hf-cache/hub` |
+| Processed Hugging Face/Arrow dataset cache | `$PRORM_PROJECT_ROOT/hf-cache/datasets` |
+| Image, build/staging/GPU evidence | `$PRORM_PROJECT_ROOT/{images,system-reports}` |
+| Generated candidates, labels, scores, features and Fisher data | `$PRORM_PROJECT_ROOT/artifacts/...` |
+| Learned linear RM heads, rollouts and aggregate | `$PRORM_PROJECT_ROOT/runs/...` |
+| Per-job working copy | `$PRORM_SCRATCH_ROOT/jobs/$SLURM_JOB_ID` |
+
+The experiment does not create another full Qwen checkpoint. Base weights stay in the pinned HF cache;
+the learned bias-free linear reward heads are serialized in `comparison.json`. The local LoRA-B policy
+update is reconstructed for evaluation and is not exported as a production adapter checkpoint.
+Each persistent run contains a relative `artifact` symlink to its content-addressed Phase-1 artifact, so
+serialized POSIX path references remain valid after scratch cleanup. Heavy assets and results are ignored
+by Git.
+
+The first SSH connection is the only interactive identity step: enter the ITSO password and complete
+Duo/2FA in the SSH client. Never send a password, 2FA response, private key or recovery code to Codex, put
+one in this repository, or place one in a Slurm log. After that private login:
 
 ```bash
-# Login node: preflight and submission only.
+ssh YOUR_ITSO@hpc4.ust.hk
+git clone https://github.com/youth-flow/Smart-Reward-Model.git
+cd Smart-Reward-Model
+test "$(git remote get-url origin)" = \
+  "https://github.com/youth-flow/Smart-Reward-Model.git"
+git rev-parse --verify HEAD
+
+# Private, ignored path configuration; never edit the tracked example.
+test -e .env.hpc4 || cp scripts/hpc4/env.example .env.hpc4
+source .env.hpc4
+mkdir -p \
+  "${PRORM_PROJECT_ROOT}"/{images,hf-cache,system-reports,slurm-logs,artifacts,runs} \
+  "${PRORM_SCRATCH_ROOT}/jobs"
 bash scripts/hpc4/preflight.sh
 
-# Canonical public environment names; legacy SRM_* aliases remain accepted.
-export PRORM_IMAGE=/project/sigroup/smart-reward-model/images/prorm.sif
-export PRORM_IMAGE_SHA256="$(sha256sum "${PRORM_IMAGE}" | awk '{print $1}')"
-export PRORM_HF_CACHE=/project/sigroup/smart-reward-model/hf-cache
-
-bash scripts/hpc4/submit_gpu_smoke.sh gpu-l20
-export PRORM_SMOKE_WALLTIME=REPLACE_WITH_MEASURED_WALLTIME
-bash scripts/hpc4/submit_controlled.sh configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
-
-export PRORM_ARRAY_CONCURRENCY=1
-export PRORM_MAIN_WALLTIME=REPLACE_WITH_APPROVED_WALLTIME
-bash scripts/hpc4/submit_controlled.sh configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
+# No image is needed for this first GPU/driver observation.
+bash scripts/hpc4/submit_host_gpu_probe.sh gpu-l20
 ```
 
-Wall time, GPU-hours and storage budgets must come from the accepted smoke record. See
-[hpc4.md](docs/hpc4.md) for the complete storage, offline staging, identity and failure contract.
+Wait for that job to complete and inspect
+`$PRORM_PROJECT_ROOT/system-reports/host-gpu-probe-<job-id>.txt`. The report determines the CUDA/PyTorch
+base. A definition committed after that decision, its build log, and its SHA256 produce a **candidate**
+image; it becomes **validated** only after `submit_gpu_smoke.sh` passes on the selected partition. The
+repository intentionally does not call an untested generic CUDA image validated.
+
+With the candidate image built on an approved Apptainer build endpoint and copied to `images/prorm.sif`,
+stage both locked configs and preserve their logs:
+
+```bash
+export PRORM_IMAGE=images/prorm.sif
+export PRORM_HF_CACHE=hf-cache
+export PRORM_IMAGE_SHA256="$(
+  sha256sum "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" | awk '{print $1}'
+)"
+
+repo_root="$(pwd -P)"
+cache_root="${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
+image_path="${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}"
+set -o pipefail
+for config in configs/smoke.yaml configs/main.yaml; do
+  stem="$(basename "${config}" .yaml)"
+  apptainer exec --cleanenv \
+    --bind "${repo_root}:${repo_root},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}" \
+    --env "PYTHONPATH=${repo_root}/src" \
+    "${image_path}" \
+    python scripts/hpc4/stage_hf_assets.py "${config}" "${cache_root}" \
+    2>&1 | tee "${PRORM_PROJECT_ROOT}/system-reports/hf-stage-${stem}.log"
+done
+sha256sum "${cache_root}"/inventories/*.json
+
+bash scripts/hpc4/submit_gpu_smoke.sh gpu-l20
+```
+
+Staging downloads only the public pinned snapshots. Its offline proof resolves snapshot revisions,
+configs, tokenizers and the MultiPref dataset; it does not claim to have instantiated model weights.
+Actual Qwen/Skywork weight loading is tested by the controlled model smoke. Each config-specific inventory
+digest is reverified offline and bound into the run manifest, artifact producer identity and final
+aggregate.
+
+Only after the GPU smoke is `COMPLETED` with `ExitCode=0:0`, its report contains every required check, the
+Git checkout is clean and `HEAD` equals the reviewed remote commit may the model jobs start:
+
+```bash
+git fetch origin main
+test -z "$(git status --porcelain --untracked-files=normal)"
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+
+export PRORM_SMOKE_WALLTIME=REPLACE_WITH_APPROVED_PILOT_WALLTIME
+bash scripts/hpc4/submit_controlled.sh \
+  configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
+
+# Fill these only from the accepted smoke measurements.
+export PRORM_ARRAY_CONCURRENCY=1
+export PRORM_MAIN_WALLTIME=REPLACE_WITH_SMOKE_DERIVED_WALLTIME
+bash scripts/hpc4/submit_controlled.sh \
+  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
+```
+
+Formal jobs never use `--allow-download`. They bind the submission Git commit and config-specific cache
+inventory before allocation work begins. Wall time, GPU-hours and storage budgets come from the accepted
+smoke record. The five-seed aggregate must be produced inside the same image under
+`$PRORM_PROJECT_ROOT/runs`, not in the Git checkout. See [hpc4.md](docs/hpc4.md) for the exact validation,
+aggregation and scratch-retention commands.
 
 ## 8. Documentation and code map
 
@@ -326,7 +417,7 @@ Wall time, GPU-hours and storage budgets must come from the accepted smoke recor
 Smart-Reward-Model/             # retained repository name
 ├── configs/                    # closed-schema smoke/main designs
 ├── docs/                       # theory, examples, protocol, HPC4 runbook
-├── scripts/hpc4/               # preflight, GPU smoke, controlled arrays
+├── scripts/hpc4/               # preflight, driver probe, staging, GPU smoke, arrays
 ├── src/smart_reward/           # retained compatibility package
 │   ├── annotations.py          # randomized repeated-label estimator
 │   ├── objective.py            # moment, reported value, envelope gradient

@@ -32,4 +32,4 @@ jobs:
       - name: Test
         run: pytest -q
       - name: Byte-compile
-        run: python -m compileall -q src tests
+        run: python -m compileall -q src tests scripts/hpc4/stage_hf_assets.py

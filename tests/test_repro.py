@@ -45,6 +45,12 @@ def test_manifest_is_utc_complete_and_never_copies_secret_environment(
     environment = {
         "SLURM_JOB_ID": "230642",
         "SLURM_CPUS_PER_TASK": "8",
+        "SLURM_SUBMIT_DIR": "/home/researcher/Smart-Reward-Model",
+        "PRORM_IMAGE": "/project/sigroup/smart-reward-model/images/prorm.sif",
+        "SRM_IMAGE": "/project/sigroup/smart-reward-model/images/prorm.sif",
+        "PRORM_IMAGE_SHA256": "a" * 64,
+        "PRORM_HF_INVENTORY_SHA256": "c" * 64,
+        "PRORM_GIT_COMMIT": "b" * 40,
         "HF_TOKEN": "hf_super_secret",
         "HUGGING_FACE_HUB_TOKEN": "also_secret",
         "WANDB_API_KEY": "wandb_super_secret",
@@ -81,7 +87,14 @@ def test_manifest_is_utc_complete_and_never_copies_secret_environment(
 
     assert payload["created_at_utc"] == "2026-07-22T10:02:29Z"
     assert payload["git"] == {"commit": "b" * 40, "dirty": False}
-    assert payload["slurm"] == {"SLURM_CPUS_PER_TASK": "8", "SLURM_JOB_ID": "230642"}
+    assert payload["slurm"] == {
+        "PRORM_GIT_COMMIT": "b" * 40,
+        "PRORM_HF_INVENTORY_SHA256": "c" * 64,
+        "PRORM_IMAGE_SHA256": "a" * 64,
+        "SLURM_CPUS_PER_TASK": "8",
+        "SLURM_JOB_ID": "230642",
+    }
+    assert not {"SLURM_SUBMIT_DIR", "PRORM_IMAGE", "SRM_IMAGE"} & set(payload["slurm"])
     assert payload["seed"] == 20260722
     assert payload["selected_seed"] == 20260722
     assert payload["normalized_config"] == config
@@ -101,6 +114,8 @@ def test_manifest_is_utc_complete_and_never_copies_secret_environment(
         "wandb_super_secret",
         "AWS_SECRET_ACCESS_KEY",
         "cloud_secret",
+        "/home/researcher/Smart-Reward-Model",
+        "/project/sigroup/smart-reward-model/images/prorm.sif",
     ):
         assert forbidden not in serialized
 
@@ -111,6 +126,7 @@ def test_slurm_collector_is_an_allowlist() -> None:
             "SLURM_JOB_ID": "1",
             "SLURM_JOB_ACCOUNT": "sigroup",
             "CUDA_VISIBLE_DEVICES": "3",
+            "PRORM_HF_INVENTORY_SHA256": "c" * 64,
             "SLURM_FAKE_SECRET": "no",
             "HF_TOKEN": "no",
         }
@@ -118,6 +134,7 @@ def test_slurm_collector_is_an_allowlist() -> None:
         "SLURM_JOB_ID": "1",
         "SLURM_JOB_ACCOUNT": "sigroup",
         "CUDA_VISIBLE_DEVICES": "3",
+        "PRORM_HF_INVENTORY_SHA256": "c" * 64,
     }
 
 
@@ -136,6 +153,7 @@ def test_execution_identity_requires_sigroup_and_exactly_one_gpu(
     environment = {
         "PRORM_GIT_COMMIT": "a" * 40,
         "PRORM_IMAGE_SHA256": "b" * 64,
+        "PRORM_HF_INVENTORY_SHA256": "c" * 64,
         "SLURM_JOB_ACCOUNT": "sigroup",
         "SLURM_JOB_PARTITION": "gpu-l20",
     }
@@ -144,12 +162,38 @@ def test_execution_identity_requires_sigroup_and_exactly_one_gpu(
         "formal": True,
         "git_commit": "a" * 40,
         "image_sha256": "b" * 64,
+        "hf_inventory_sha256": "c" * 64,
         "account": "sigroup",
         "partition": "gpu-l20",
         "gpu_models": ["NVIDIA L20"],
     }
     environment["SLURM_JOB_ACCOUNT"] = "another-account"
     assert collect_execution_identity(environment)["formal"] is False
+
+
+def test_execution_identity_is_not_formal_without_hf_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        repro_module,
+        "collect_torch_state",
+        lambda: {
+            "cuda_available": True,
+            "gpu_count": 1,
+            "gpus": [{"name": "NVIDIA L20"}],
+        },
+    )
+    identity = collect_execution_identity(
+        {
+            "PRORM_GIT_COMMIT": "a" * 40,
+            "PRORM_IMAGE_SHA256": "b" * 64,
+            "SLURM_JOB_ACCOUNT": "sigroup",
+            "SLURM_JOB_PARTITION": "gpu-l20",
+        }
+    )
+
+    assert identity["formal"] is False
+    assert identity["hf_inventory_sha256"] is None
 
 
 def test_execution_identity_accepts_legacy_keys_but_rejects_conflicts(
@@ -167,6 +211,7 @@ def test_execution_identity_accepts_legacy_keys_but_rejects_conflicts(
     environment = {
         "SRM_GIT_COMMIT": "a" * 40,
         "SRM_IMAGE_SHA256": "b" * 64,
+        "SRM_HF_INVENTORY_SHA256": "c" * 64,
         "SLURM_JOB_ACCOUNT": "sigroup",
         "SLURM_JOB_PARTITION": "gpu-l20",
     }
@@ -201,6 +246,20 @@ def test_failed_atomic_write_preserves_existing_destination(tmp_path: Path) -> N
 
     assert destination.read_text(encoding="utf-8") == "old\n"
     assert list(tmp_path.glob(".manifest.json.*.tmp")) == []
+
+
+def test_exclusive_atomic_json_write_creates_once_and_refuses_overwrite(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "aggregate.json"
+
+    atomic_write_json(destination, {"version": 1}, overwrite=False)
+
+    assert json.loads(destination.read_text(encoding="utf-8")) == {"version": 1}
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        atomic_write_json(destination, {"version": 2}, overwrite=False)
+    assert json.loads(destination.read_text(encoding="utf-8")) == {"version": 1}
+    assert list(tmp_path.glob(".aggregate.json.*.tmp")) == []
 
 
 def test_manifest_does_not_implicitly_read_supplied_secret_process_env(

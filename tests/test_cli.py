@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -27,8 +29,10 @@ def test_formal_execution_is_explicit_not_implied_by_local_cuda_visibility(
         "SLURM_JOB_ID",
         "PRORM_GIT_COMMIT",
         "PRORM_IMAGE_SHA256",
+        "PRORM_HF_INVENTORY_SHA256",
         "SRM_GIT_COMMIT",
         "SRM_IMAGE_SHA256",
+        "SRM_HF_INVENTORY_SHA256",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
@@ -36,6 +40,84 @@ def test_formal_execution_is_explicit_not_implied_by_local_cuda_visibility(
 
     monkeypatch.setenv("SLURM_JOB_ID", "230642")
     assert cli_module._formal_execution_requested() is True
+
+
+def test_formal_manifest_requires_hf_inventory_digest(tmp_path: Path) -> None:
+    manifest = tmp_path / "run-manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": "smart-reward-run/v1",
+                "config_hash": "c" * 64,
+                "selected_seed": 7,
+                "git": {"commit": "a" * 40, "dirty": False},
+                "slurm": {
+                    "PRORM_GIT_COMMIT": "a" * 40,
+                    "PRORM_IMAGE_SHA256": "b" * 64,
+                    "SLURM_JOB_ACCOUNT": "sigroup",
+                    "SLURM_JOB_PARTITION": "gpu-l20",
+                },
+                "torch": {
+                    "cuda_available": True,
+                    "gpu_count": 1,
+                    "gpus": [{"name": "NVIDIA L20"}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="HF-inventory"):
+        cli_module._run_environment_identity(
+            manifest,
+            expected_config_hash="c" * 64,
+            expected_seed=7,
+            require_formal=True,
+        )
+
+
+def test_aggregation_source_requires_exact_clean_tracked_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    config = repo / "configs" / "main.yaml"
+    (repo / ".git").mkdir(parents=True)
+    config.parent.mkdir()
+    config.write_text("run: {}\n", encoding="utf-8")
+    expected = "a" * 40
+    monkeypatch.setattr(
+        cli_module,
+        "collect_git_state",
+        lambda *_: {"commit": expected, "dirty": False},
+    )
+    monkeypatch.setattr(
+        cli_module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0),
+    )
+
+    assert cli_module._aggregation_source_identity(
+        repo,
+        config,
+        expected_commit=expected,
+    ) == {
+        "git_commit": expected,
+        "git_dirty": False,
+        "config_path": "configs/main.yaml",
+    }
+
+    monkeypatch.setattr(
+        cli_module,
+        "collect_git_state",
+        lambda *_: {"commit": "b" * 40, "dirty": False},
+    )
+    with pytest.raises(ValueError, match="exact formal producer commit"):
+        cli_module._aggregation_source_identity(
+            repo,
+            config,
+            expected_commit=expected,
+        )
 
 
 def test_config_check_success(capsys: pytest.CaptureFixture[str]) -> None:
@@ -150,6 +232,7 @@ def test_env_report_atomically_writes_manifest(
     manifest = json.loads(output.read_text(encoding="utf-8"))
     assert announcement["status"] == "ok"
     assert announcement["config_hash"] == manifest["config_hash"]
+    assert announcement["output"] == "run-manifest.json"
     assert manifest["selected_seed"] == 20260722
     assert manifest["slurm"] == {"SLURM_JOB_ID": "42"}
 
@@ -209,11 +292,103 @@ def test_closed_form_check_writes_complete_audit(
         assert all(left > right for left, right in zip(errors, errors[1:], strict=False))
 
 
+def test_controlled_compare_persists_relative_posix_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import smart_reward.artifacts as artifact_module
+    import smart_reward.experiment as experiment_module
+
+    inputs = tmp_path / "inputs"
+    artifact_dir = inputs / "artifact"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "evidence": {
+                    "producer": {
+                        "git_commit": "a" * 40,
+                        "image_sha256": "b" * 64,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = inputs / "run-manifest.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    output = tmp_path / "results" / "comparison.json"
+
+    monkeypatch.setattr(cli_module, "_formal_execution_requested", lambda: False)
+    monkeypatch.setattr(
+        cli_module,
+        "_run_environment_identity",
+        lambda *args, **kwargs: (
+            "c" * 64,
+            {
+                "formal": False,
+                "git_commit": None,
+                "image_sha256": None,
+                "hf_inventory_sha256": None,
+                "account": None,
+                "partition": None,
+                "gpu_models": [],
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        artifact_module,
+        "load_controlled_feature_artifact",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        artifact_module,
+        "artifact_metadata_sha256",
+        lambda *args, **kwargs: "d" * 64,
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "compile_feature_experiment_config",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(
+        experiment_module,
+        "run_feature_experiment",
+        lambda *args, **kwargs: SimpleNamespace(to_dict=lambda: {"status": "ok"}),
+    )
+
+    assert (
+        cli_module._controlled_compare(
+            argparse.Namespace(
+                config=str(ROOT / "configs" / "smoke.yaml"),
+                seed=20260722,
+                artifact_dir=str(artifact_dir.resolve()),
+                output=str(output.resolve()),
+                run_manifest=str(manifest.resolve()),
+                device="cpu",
+            )
+        )
+        == 0
+    )
+
+    announcement = json.loads(capsys.readouterr().out)
+    assert announcement["output"] == "comparison.json"
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["artifact_dir"] == "../inputs/artifact"
+    assert payload["run_manifest"] == "../inputs/run-manifest.json"
+    assert "\\" not in payload["artifact_dir"]
+    assert "\\" not in payload["run_manifest"]
+    assert not Path(payload["artifact_dir"]).is_absolute()
+    assert not Path(payload["run_manifest"]).is_absolute()
+
+
 @pytest.mark.parametrize("artifact_version", [1, 2], ids=["legacy-v1", "canonical-v2"])
 def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     artifact_version: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     seeds = [20260722, 20260723, 20260724, 20260725, 20260726]
     paths: list[str] = []
@@ -238,6 +413,11 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
                         ("SRM_GIT_COMMIT" if artifact_version == 1 else "PRORM_GIT_COMMIT"): (
                             "a" * 40
                         ),
+                        (
+                            "SRM_HF_INVENTORY_SHA256"
+                            if artifact_version == 1
+                            else "PRORM_HF_INVENTORY_SHA256"
+                        ): ("c" * 64),
                         "SLURM_JOB_ACCOUNT": "sigroup",
                         "SLURM_JOB_PARTITION": "gpu-l20",
                     },
@@ -255,6 +435,7 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
             "formal": True,
             "git_commit": "a" * 40,
             "image_sha256": "b" * 64,
+            "hf_inventory_sha256": "c" * 64,
             "account": "sigroup",
             "partition": "gpu-l20",
             "gpu_models": ["NVIDIA L20"],
@@ -355,6 +536,15 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
         )
         rollout_paths.append(str(rollout_path))
     output = tmp_path / "aggregate.json"
+    monkeypatch.setattr(
+        cli_module,
+        "_aggregation_source_identity",
+        lambda *args, **kwargs: {
+            "git_commit": "a" * 40,
+            "git_dirty": False,
+            "config_path": "configs/main.yaml",
+        },
+    )
 
     assert (
         main(
@@ -363,6 +553,8 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
                 str(ROOT / "configs" / "main.yaml"),
                 str(output),
                 *paths,
+                "--repo-root",
+                str(ROOT),
                 "--rollouts",
                 *rollout_paths,
             ]
@@ -370,7 +562,9 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
         == 0
     )
 
-    assert json.loads(capsys.readouterr().out)["num_seeds"] == 5
+    announcement = json.loads(capsys.readouterr().out)
+    assert announcement["num_seeds"] == 5
+    assert announcement["output"] == "aggregate.json"
     aggregate = json.loads(output.read_text(encoding="utf-8"))
     assert aggregate["schema_version"] == "paired-seed-aggregate/v2"
     assert aggregate["num_seeds"] == 5
@@ -378,7 +572,25 @@ def test_aggregate_results_requires_and_uses_all_declared_paired_seeds(
     assert aggregate["metrics"]["test_rollout_improvement"]["paired_mean"] == (pytest.approx(0.1))
     assert aggregate["config_hash"] == digest
     assert aggregate["environment_identity"]["gpu_models"] == ["NVIDIA L20"]
+    assert aggregate["aggregation_source"] == {
+        "git_commit": "a" * 40,
+        "git_dirty": False,
+        "config_path": "configs/main.yaml",
+    }
     assert len(aggregate["sources"]) == 5
+    first_source = aggregate["sources"][0]
+    assert first_source["comparison_path"] == "20260722/comparison.json"
+    assert first_source["run_manifest_path"] == "20260722/run-manifest.json"
+    assert first_source["rollout_path"] == "20260722/rollout.json"
+    assert first_source["updated_rollouts_path"] == "20260722/updated_rollouts.jsonl"
+    for key in (
+        "comparison_path",
+        "run_manifest_path",
+        "rollout_path",
+        "updated_rollouts_path",
+    ):
+        assert not Path(first_source[key]).is_absolute()
+        assert "\\" not in first_source[key]
     assert len(aggregate["damping_evidence"]) == 3
     assert aggregate["pre_registered_evidence"]["status"] == "not_passed"
     first = aggregate["metrics"]["test_local_regret"]["per_seed"][0]

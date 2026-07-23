@@ -532,9 +532,24 @@ def _producer_identity_from_environment() -> dict[str, str]:
     """Read only formal-run producer digests; never snapshot the environment."""
 
     result: dict[str, str] = {}
+    formal_environment_names = (
+        "SLURM_JOB_ID",
+        "PRORM_GIT_COMMIT",
+        "SRM_GIT_COMMIT",
+        "PRORM_IMAGE_SHA256",
+        "SRM_IMAGE_SHA256",
+        "PRORM_HF_INVENTORY_SHA256",
+        "SRM_HF_INVENTORY_SHA256",
+    )
     for canonical_name, legacy_name, evidence_name, lengths in (
         ("PRORM_GIT_COMMIT", "SRM_GIT_COMMIT", "git_commit", {40, 64}),
         ("PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256", "image_sha256", {64}),
+        (
+            "PRORM_HF_INVENTORY_SHA256",
+            "SRM_HF_INVENTORY_SHA256",
+            "hf_inventory_sha256",
+            {64},
+        ),
     ):
         value = compatibility_value(os.environ, canonical_name, legacy_name)
         if value is None:
@@ -544,6 +559,10 @@ def _producer_identity_from_environment() -> dict[str, str]:
         if len(value) not in lengths or any(character not in _LOWER_HEX for character in value):
             raise ValueError(f"{canonical_name} must be a lowercase hexadecimal producer digest")
         result[evidence_name] = value
+    formal_requested = any(bool(os.environ.get(name)) for name in formal_environment_names)
+    expected_fields = {"git_commit", "image_sha256", "hf_inventory_sha256"}
+    if formal_requested and set(result) != expected_fields:
+        raise ValueError("formal artifact production requires Git, image, and HF inventory digests")
     return result
 
 

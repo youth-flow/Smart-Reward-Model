@@ -50,6 +50,7 @@ from .data import CandidateNode, load_jsonl
 from .experiment import ControlledFeatureExperiment
 from .hf import ExactTokenCandidates, FixedALoRASetup
 from .oracle import RobustOracleTransform
+from .paths import relative_posix_reference
 from .prompts import PromptRecord, load_prompt_jsonl
 from .repro import collect_execution_identity
 from .rollout import (
@@ -147,6 +148,7 @@ def _validate_environment_identity(
         "formal",
         "git_commit",
         "image_sha256",
+        "hf_inventory_sha256",
         "account",
         "partition",
         "gpu_models",
@@ -158,6 +160,10 @@ def _validate_environment_identity(
     if value["formal"] is not True:
         raise ValueError("matched-KL rollout requires a formal comparison environment")
     image = _validate_digest(value["image_sha256"], name=f"{name} image_sha256")
+    hf_inventory = _validate_digest(
+        value["hf_inventory_sha256"],
+        name=f"{name} hf_inventory_sha256",
+    )
     git_commit = value["git_commit"]
     if (
         not isinstance(git_commit, str)
@@ -183,6 +189,7 @@ def _validate_environment_identity(
         "formal": True,
         "git_commit": git_commit,
         "image_sha256": image,
+        "hf_inventory_sha256": hf_inventory,
         "account": "sigroup",
         "partition": partition,
         "gpu_models": [gpu_models[0]],
@@ -493,6 +500,7 @@ def assemble_rollout_result(
     artifact_dir: str | os.PathLike[str],
     comparison_json: str | os.PathLike[str],
     updated_rollouts_jsonl: str | os.PathLike[str],
+    reference_base: str | os.PathLike[str],
     artifact_metadata_sha256: str,
     comparison_sha256: str,
     updated_rollouts_sha256: str,
@@ -508,7 +516,7 @@ def assemble_rollout_result(
     num_test_prompts: int,
     candidates_per_prompt: int,
 ) -> dict[str, object]:
-    """Assemble the strict JSON result without accessing a model or filesystem."""
+    """Assemble the strict JSON result without model inference or file reads."""
 
     digest = _validate_digest(config_sha256, name="config_sha256")
     artifact_digest = _validate_digest(artifact_metadata_sha256, name="artifact_metadata_sha256")
@@ -595,9 +603,12 @@ def assemble_rollout_result(
         "schema_version": _RESULT_SCHEMA,
         "config_hash": digest,
         "seed": validated_seed,
-        "artifact_dir": str(Path(artifact_dir)),
-        "comparison_json": str(Path(comparison_json)),
-        "updated_rollouts_jsonl": str(Path(updated_rollouts_jsonl)),
+        "artifact_dir": relative_posix_reference(artifact_dir, base=reference_base),
+        "comparison_json": relative_posix_reference(comparison_json, base=reference_base),
+        "updated_rollouts_jsonl": relative_posix_reference(
+            updated_rollouts_jsonl,
+            base=reference_base,
+        ),
         "artifact_metadata_sha256": artifact_digest,
         "comparison_sha256": comparison_digest,
         "updated_rollouts_sha256": rollouts_digest,
@@ -644,7 +655,8 @@ class _ArtifactContract:
 
 
 def _validate_producer_identity(value: object) -> dict[str, str]:
-    if not isinstance(value, Mapping) or not set(value).issubset({"git_commit", "image_sha256"}):
+    fields = {"git_commit", "image_sha256", "hf_inventory_sha256"}
+    if not isinstance(value, Mapping) or not set(value).issubset(fields):
         raise ValueError("artifact producer must contain only validated digest fields")
     producer: dict[str, str] = {}
     for name, raw_digest in value.items():
@@ -659,7 +671,7 @@ def _validate_producer_identity(value: object) -> dict[str, str]:
     formal_producer = _phase1._producer_identity_from_environment()
     if formal_producer and producer != formal_producer:
         raise ValueError(
-            "artifact producer identity does not match PRORM_GIT_COMMIT/PRORM_IMAGE_SHA256"
+            "artifact producer identity does not match the formal Git/image/HF-inventory identity"
         )
     return producer
 
@@ -1379,6 +1391,7 @@ def evaluate_matched_kl_rollouts(
             artifact_dir=artifact_path,
             comparison_json=comparison_path,
             updated_rollouts_jsonl=rollouts_path,
+            reference_base=destination.parent,
             artifact_metadata_sha256=artifact_metadata_digest,
             comparison_sha256=comparison_digest,
             updated_rollouts_sha256=rollouts_digest,

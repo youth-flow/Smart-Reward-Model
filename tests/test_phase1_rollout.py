@@ -57,6 +57,7 @@ def _comparison(
             "formal": True,
             "git_commit": "a" * 40,
             "image_sha256": "b" * 64,
+            "hf_inventory_sha256": "c" * 64,
             "account": "sigroup",
             "partition": "gpu-l20",
             "gpu_models": ["test-gpu"],
@@ -208,13 +209,15 @@ def _update_evidence() -> dict[str, object]:
     }
 
 
-def test_rollout_result_uses_one_shared_reference_mean() -> None:
+def test_rollout_result_uses_one_shared_reference_mean(tmp_path: Path) -> None:
+    reference_base = (tmp_path / "run").resolve()
     result = stage.assemble_rollout_result(
         config_sha256="c" * 64,
         seed=3,
-        artifact_dir="artifact",
-        comparison_json="comparison.json",
-        updated_rollouts_jsonl="updated_rollouts.jsonl",
+        artifact_dir=(tmp_path / "artifact").resolve(),
+        comparison_json=(reference_base / "comparison.json").resolve(),
+        updated_rollouts_jsonl=(reference_base / "updated_rollouts.jsonl").resolve(),
+        reference_base=reference_base,
         artifact_metadata_sha256="d" * 64,
         comparison_sha256="e" * 64,
         updated_rollouts_sha256="f" * 64,
@@ -223,6 +226,7 @@ def test_rollout_result_uses_one_shared_reference_mean() -> None:
             "formal": True,
             "git_commit": "b" * 40,
             "image_sha256": "c" * 64,
+            "hf_inventory_sha256": "d" * 64,
             "account": "sigroup",
             "partition": "gpu-l20",
             "gpu_models": ["NVIDIA L20"],
@@ -246,6 +250,9 @@ def test_rollout_result_uses_one_shared_reference_mean() -> None:
         num_test_prompts=2,
         candidates_per_prompt=2,
     )
+    assert result["artifact_dir"] == "../artifact"
+    assert result["comparison_json"] == "comparison.json"
+    assert result["updated_rollouts_jsonl"] == "updated_rollouts.jsonl"
     assert result["test_reference"]["source"] == "zero_b_common_random_number_rollout"
     assert result["test_reference"]["transformed_oracle_mean"] == pytest.approx(0.0)
     assert result["artifact_test_descriptive_sanity"]["paired_with_updated_rollouts"] is False
@@ -302,15 +309,44 @@ def test_formal_environment_must_match_artifact_producer(
 ) -> None:
     monkeypatch.delenv("SRM_GIT_COMMIT", raising=False)
     monkeypatch.delenv("SRM_IMAGE_SHA256", raising=False)
-    producer = {"git_commit": "a" * 40, "image_sha256": "b" * 64}
+    monkeypatch.delenv("SRM_HF_INVENTORY_SHA256", raising=False)
+    producer = {
+        "git_commit": "a" * 40,
+        "image_sha256": "b" * 64,
+        "hf_inventory_sha256": "c" * 64,
+    }
     assert stage._validate_producer_identity(producer) == producer
 
     monkeypatch.setenv("SRM_GIT_COMMIT", "a" * 40)
     monkeypatch.setenv("SRM_IMAGE_SHA256", "b" * 64)
+    monkeypatch.setenv("SRM_HF_INVENTORY_SHA256", "c" * 64)
     assert stage._validate_producer_identity(producer) == producer
     monkeypatch.setenv("SRM_IMAGE_SHA256", "c" * 64)
     with pytest.raises(ValueError, match="producer identity"):
         stage._validate_producer_identity(producer)
+
+
+def test_legacy_producer_without_inventory_is_nonformal_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = {"git_commit": "a" * 40, "image_sha256": "b" * 64}
+    for name in (
+        "SLURM_JOB_ID",
+        "PRORM_GIT_COMMIT",
+        "SRM_GIT_COMMIT",
+        "PRORM_IMAGE_SHA256",
+        "SRM_IMAGE_SHA256",
+        "PRORM_HF_INVENTORY_SHA256",
+        "SRM_HF_INVENTORY_SHA256",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert stage._validate_producer_identity(legacy) == legacy
+
+    monkeypatch.setenv("PRORM_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("PRORM_IMAGE_SHA256", "b" * 64)
+    monkeypatch.setenv("PRORM_HF_INVENTORY_SHA256", "c" * 64)
+    with pytest.raises(ValueError, match="producer identity"):
+        stage._validate_producer_identity(legacy)
 
 
 def _experiment() -> ControlledFeatureExperiment:
@@ -499,6 +535,9 @@ def test_fake_loader_end_to_end_writes_no_raw_oracle(
         device="cpu",
     )
     assert payload["schema_version"] == "matched-kl-rollout/v2"
+    assert payload["artifact_dir"] == "fake-artifact"
+    assert payload["comparison_json"] == "comparison.json"
+    assert payload["updated_rollouts_jsonl"] == "updated_rollouts.jsonl"
     assert output.exists()
     rollout_path = tmp_path / "updated_rollouts.jsonl"
     rows = [json.loads(line) for line in rollout_path.read_text(encoding="utf-8").splitlines()]

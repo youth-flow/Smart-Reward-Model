@@ -328,11 +328,27 @@ def test_producer_identity_reads_only_validated_digest_fields(
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-appear")
     monkeypatch.setenv("PRORM_GIT_COMMIT", "a" * 40)
     monkeypatch.setenv("PRORM_IMAGE_SHA256", "b" * 64)
+    monkeypatch.setenv("PRORM_HF_INVENTORY_SHA256", "c" * 64)
     assert _producer_identity_from_environment() == {
         "git_commit": "a" * 40,
         "image_sha256": "b" * 64,
+        "hf_inventory_sha256": "c" * 64,
     }
 
     monkeypatch.setenv("PRORM_IMAGE_SHA256", "not-a-digest")
     with pytest.raises(ValueError, match="producer digest"):
+        _producer_identity_from_environment()
+
+
+def test_formal_producer_requires_hf_inventory_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from smart_reward.phase1 import _producer_identity_from_environment
+
+    monkeypatch.setenv("SLURM_JOB_ID", "1")
+    monkeypatch.setenv("PRORM_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("PRORM_IMAGE_SHA256", "b" * 64)
+    monkeypatch.delenv("PRORM_HF_INVENTORY_SHA256", raising=False)
+    monkeypatch.delenv("SRM_HF_INVENTORY_SHA256", raising=False)
+    with pytest.raises(ValueError, match="requires Git, image, and HF inventory"):
         _producer_identity_from_environment()

@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -27,7 +28,13 @@ from .contracts import (
     compatibility_value,
 )
 from .data import SchemaError, TrainingEdgeRecord, load_jsonl
-from .repro import atomic_write_json, build_run_manifest, collect_execution_identity
+from .paths import relative_posix_reference
+from .repro import (
+    atomic_write_json,
+    build_run_manifest,
+    collect_execution_identity,
+    collect_git_state,
+)
 
 
 def _resolve_run_seed(config: dict[str, object], requested_seed: int | None) -> int:
@@ -147,6 +154,11 @@ def _run_environment_identity(
         raise ValueError(f"{path}:git.dirty must be boolean")
 
     image = compatibility_value(slurm, "PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256")
+    hf_inventory = compatibility_value(
+        slurm,
+        "PRORM_HF_INVENTORY_SHA256",
+        "SRM_HF_INVENTORY_SHA256",
+    )
     environment_commit = compatibility_value(slurm, "PRORM_GIT_COMMIT", "SRM_GIT_COMMIT")
     account = slurm.get("SLURM_JOB_ACCOUNT")
     partition = slurm.get("SLURM_JOB_PARTITION")
@@ -157,6 +169,7 @@ def _run_environment_identity(
     complete = (
         dirty is False
         and isinstance(image, str)
+        and isinstance(hf_inventory, str)
         and isinstance(environment_commit, str)
         and environment_commit == commit
         and isinstance(partition, str)
@@ -169,12 +182,20 @@ def _run_environment_identity(
         and bool(gpu_names[0])
     )
     if require_formal and not complete:
-        raise ValueError(f"{path} lacks a clean, single-GPU Slurm/image/Git environment identity")
+        raise ValueError(
+            f"{path} lacks a clean, single-GPU Slurm/image/Git/HF-inventory environment identity"
+        )
     if complete:
         image = _lower_hex_digest(image, path=f"{path}:slurm.PRORM_IMAGE_SHA256", lengths={64})
+        hf_inventory = _lower_hex_digest(
+            hf_inventory,
+            path=f"{path}:slurm.PRORM_HF_INVENTORY_SHA256",
+            lengths={64},
+        )
     else:
         commit = None
         image = None
+        hf_inventory = None
         account = None
         partition = None
         gpu_names = []
@@ -182,6 +203,7 @@ def _run_environment_identity(
         "formal": complete,
         "git_commit": commit,
         "image_sha256": image,
+        "hf_inventory_sha256": hf_inventory,
         "account": account,
         "partition": partition,
         "gpu_models": gpu_names,
@@ -200,8 +222,10 @@ def _formal_execution_requested() -> bool:
             "SLURM_JOB_ID",
             "PRORM_GIT_COMMIT",
             "PRORM_IMAGE_SHA256",
+            "PRORM_HF_INVENTORY_SHA256",
             "SRM_GIT_COMMIT",
             "SRM_IMAGE_SHA256",
+            "SRM_HF_INVENTORY_SHA256",
         )
     )
 
@@ -273,7 +297,7 @@ def _env_report(arguments: argparse.Namespace) -> int:
         _print_json(
             {
                 "config_hash": manifest.config_hash,
-                "output": str(Path(arguments.output)),
+                "output": Path(arguments.output).name,
                 "status": "ok",
             }
         )
@@ -452,7 +476,7 @@ def _controlled_materialize(arguments: argparse.Namespace) -> int:
     )
     _print_json(
         {
-            "artifact_dir": str(materialization.artifact_directory),
+            "artifact_dir": materialization.artifact_directory.name,
             "config_hash": config_hash(config),
             "seed": seed,
             "status": "ok",
@@ -518,6 +542,7 @@ def _controlled_compare(arguments: argparse.Namespace) -> int:
     if environment_identity["formal"] and artifact_producer != {
         "git_commit": environment_identity["git_commit"],
         "image_sha256": environment_identity["image_sha256"],
+        "hf_inventory_sha256": environment_identity["hf_inventory_sha256"],
     }:
         raise ValueError("artifact producer does not match the run manifest environment")
     if arguments.device != "cpu":
@@ -567,9 +592,15 @@ def _controlled_compare(arguments: argparse.Namespace) -> int:
         "schema_version": CONTROLLED_COMPARISON_SCHEMA_V2,
         "config_hash": digest,
         "seed": seed,
-        "artifact_dir": str(Path(arguments.artifact_dir)),
+        "artifact_dir": relative_posix_reference(
+            arguments.artifact_dir,
+            base=destination.parent,
+        ),
         "artifact_metadata_sha256": artifact_identity,
-        "run_manifest": str(Path(arguments.run_manifest)),
+        "run_manifest": relative_posix_reference(
+            arguments.run_manifest,
+            base=destination.parent,
+        ),
         "run_manifest_sha256": manifest_sha256,
         "environment_identity": environment_identity,
         "damping_runs": damping_runs,
@@ -580,7 +611,7 @@ def _controlled_compare(arguments: argparse.Namespace) -> int:
         {
             "config_hash": digest,
             "damping_runs": len(damping_runs),
-            "output": str(destination),
+            "output": destination.name,
             "seed": seed,
             "status": "ok",
         }
@@ -605,10 +636,10 @@ def _controlled_rollout(arguments: argparse.Namespace) -> int:
     _print_json(
         {
             "config_hash": payload["config_hash"],
-            "output": str(Path(arguments.output)),
+            "output": Path(arguments.output).name,
             "seed": seed,
             "status": "ok",
-            "updated_rollouts": str(Path(arguments.output).parent / "updated_rollouts.jsonl"),
+            "updated_rollouts": "updated_rollouts.jsonl",
         }
     )
     return 0
@@ -619,6 +650,7 @@ def _load_comparison_metrics(
     *,
     expected_config_hash: str,
     expected_damping_multipliers: tuple[float, ...],
+    reference_base: str | os.PathLike[str],
 ) -> tuple[
     dict[int, dict[str, float]],
     dict[int, dict[str, float]],
@@ -782,10 +814,13 @@ def _load_comparison_metrics(
         bt_by_seed[seed] = learners[BT_MLE]
         prorm_plus_by_seed[seed] = learners[PRORM_PLUS]
         sources[seed] = {
-            "comparison_path": str(path),
+            "comparison_path": relative_posix_reference(path, base=reference_base),
             "comparison_sha256": _sha256_file(path),
             "artifact_metadata_sha256": artifact_identity,
-            "run_manifest_path": str(manifest_path),
+            "run_manifest_path": relative_posix_reference(
+                manifest_path,
+                base=reference_base,
+            ),
             "run_manifest_sha256": manifest_sha,
             "environment_identity": environment_identity,
         }
@@ -799,6 +834,7 @@ def _load_rollout_metrics(
     comparison_sources: dict[int, dict[str, object]],
     expected_kl: float,
     kl_relative_tolerance: float,
+    reference_base: str | os.PathLike[str],
 ) -> tuple[dict[int, float], dict[int, float], dict[int, dict[str, object]]]:
     bt_by_seed: dict[int, float] = {}
     prorm_plus_by_seed: dict[int, float] = {}
@@ -908,9 +944,12 @@ def _load_rollout_metrics(
         prorm_plus_by_seed[seed] = parsed[PRORM_PLUS]
         sources[seed] = {
             **comparison_source,
-            "rollout_path": str(path),
+            "rollout_path": relative_posix_reference(path, base=reference_base),
             "rollout_sha256": _sha256_file(path),
-            "updated_rollouts_path": str(rollouts_path),
+            "updated_rollouts_path": relative_posix_reference(
+                rollouts_path,
+                base=reference_base,
+            ),
             "updated_rollouts_sha256": recorded_rollouts,
         }
         if value.get("train_oracle_values_accessed") is not False:
@@ -1028,10 +1067,66 @@ def _pre_registered_evidence_status(
     }
 
 
+def _aggregation_source_identity(
+    repo_root: str | os.PathLike[str],
+    config_path: str | os.PathLike[str],
+    *,
+    expected_commit: object,
+) -> dict[str, object]:
+    """Bind aggregation code and config to the formal producer commit."""
+
+    if (
+        not isinstance(expected_commit, str)
+        or len(expected_commit) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in expected_commit)
+    ):
+        raise ValueError("formal seed identity has an invalid Git commit")
+    root = Path(repo_root).resolve()
+    config = Path(config_path).resolve()
+    if not (root / ".git").exists():
+        raise ValueError(f"aggregation repo root is not a Git worktree: {root}")
+    try:
+        relative_config = config.relative_to(root)
+    except ValueError as error:
+        raise ValueError("aggregation config must be inside the declared Git worktree") from error
+    git_state = collect_git_state(root)
+    if git_state != {"commit": expected_commit, "dirty": False}:
+        raise ValueError(
+            "aggregation requires a clean checkout at the exact formal producer commit"
+        )
+    try:
+        tracked = subprocess.run(
+            [
+                "git",
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                relative_config.as_posix(),
+            ],
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError("could not verify the aggregation config in Git") from error
+    if tracked.returncode != 0:
+        raise ValueError("aggregation config must be tracked by the producer commit")
+    return {
+        "git_commit": expected_commit,
+        "git_dirty": False,
+        "config_path": relative_config.as_posix(),
+    }
+
+
 def _aggregate_results(arguments: argparse.Namespace) -> int:
     from .statistics import aggregate_paired_metrics
 
     config = load_config(arguments.config)
+    destination = Path(arguments.output)
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"refusing to overwrite existing aggregate: {destination}")
     declared = config["run"].get("seeds")
     if not isinstance(declared, list):
         raise ConfigError("aggregate-results requires a config with run.seeds")
@@ -1046,6 +1141,7 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         arguments.results,
         expected_config_hash=digest,
         expected_damping_multipliers=damping_multipliers,
+        reference_base=destination.parent,
     )
     if set(bt_by_seed) != set(int(seed) for seed in declared):
         raise ValueError("comparison result seeds must exactly match config run.seeds")
@@ -1055,6 +1151,7 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         comparison_sources=comparison_sources,
         expected_kl=float(config["evaluation"]["kl_budget"]),
         kl_relative_tolerance=float(config["evaluation"]["kl_relative_tolerance"]),
+        reference_base=destination.parent,
     )
     if set(bt_rollout) != set(bt_by_seed):
         raise ValueError("rollout result seeds must exactly match comparison seeds")
@@ -1067,9 +1164,14 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         for seed in ordered_seeds[1:]
     ):
         raise ValueError(
-            "all paired seeds must use the same Git commit, image, account, "
-            "partition, and GPU model"
+            "all paired seeds must use the same Git commit, image, HF inventory, "
+            "account, partition, and GPU model"
         )
+    aggregation_source = _aggregation_source_identity(
+        arguments.repo_root,
+        arguments.config,
+        expected_commit=shared_environment.get("git_commit"),
+    )
     for seed in bt_by_seed:
         bt_by_seed[seed]["test_rollout_improvement"] = bt_rollout[seed]
         prorm_plus_by_seed[seed]["test_rollout_improvement"] = prorm_plus_rollout[seed]
@@ -1090,7 +1192,6 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         bootstrap_seed=int(evaluation["paired_bootstrap_seed"]),
         num_resamples=int(evaluation["paired_bootstrap_resamples"]),
     )
-    destination = Path(arguments.output)
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = aggregate.to_dict()
     sensitivity, all_pcg, nonreversal = _aggregate_damping_evidence(
@@ -1101,6 +1202,7 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
     )
     payload["config_hash"] = digest
     payload["environment_identity"] = shared_environment
+    payload["aggregation_source"] = aggregation_source
     payload["damping_evidence"] = sensitivity
     payload["pre_registered_evidence"] = _pre_registered_evidence_status(
         payload,
@@ -1108,12 +1210,12 @@ def _aggregate_results(arguments: argparse.Namespace) -> int:
         sensitivity_nonreversal=nonreversal,
     )
     payload["sources"] = [{"seed": seed, **sources[seed]} for seed in sorted(sources)]
-    atomic_write_json(destination, payload)
+    atomic_write_json(destination, payload, overwrite=False)
     _print_json(
         {
             "evidence_status": payload["pre_registered_evidence"]["status"],
             "num_seeds": len(bt_by_seed),
-            "output": str(destination),
+            "output": destination.name,
             "status": "ok",
         }
     )
@@ -1248,6 +1350,11 @@ def build_parser() -> argparse.ArgumentParser:
     aggregate_parser.add_argument("config")
     aggregate_parser.add_argument("output")
     aggregate_parser.add_argument("results", nargs="+")
+    aggregate_parser.add_argument(
+        "--repo-root",
+        required=True,
+        help="clean Git checkout at the exact producer commit used by every input seed",
+    )
     aggregate_parser.add_argument(
         "--rollouts",
         nargs="+",

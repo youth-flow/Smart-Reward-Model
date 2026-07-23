@@ -47,15 +47,14 @@ _SLURM_ENVIRONMENT_KEYS = (
     "SLURM_PROCID",
     "SLURM_LOCALID",
     "SLURM_NODEID",
-    "SLURM_SUBMIT_DIR",
     "CUDA_VISIBLE_DEVICES",
     "NVIDIA_VISIBLE_DEVICES",
     "GPU_DEVICE_ORDINAL",
-    "PRORM_IMAGE",
     "PRORM_IMAGE_SHA256",
+    "PRORM_HF_INVENTORY_SHA256",
     "PRORM_GIT_COMMIT",
-    "SRM_IMAGE",
     "SRM_IMAGE_SHA256",
+    "SRM_HF_INVENTORY_SHA256",
     "SRM_GIT_COMMIT",
 )
 
@@ -214,6 +213,11 @@ def collect_execution_identity(
     )
     commit = compatibility_value(source, "PRORM_GIT_COMMIT", "SRM_GIT_COMMIT")
     image = compatibility_value(source, "PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256")
+    hf_inventory = compatibility_value(
+        source,
+        "PRORM_HF_INVENTORY_SHA256",
+        "SRM_HF_INVENTORY_SHA256",
+    )
     account = source.get("SLURM_JOB_ACCOUNT")
     partition = source.get("SLURM_JOB_PARTITION")
     complete = (
@@ -223,6 +227,9 @@ def collect_execution_identity(
         and isinstance(image, str)
         and len(image) == 64
         and all(character in "0123456789abcdef" for character in image)
+        and isinstance(hf_inventory, str)
+        and len(hf_inventory) == 64
+        and all(character in "0123456789abcdef" for character in hf_inventory)
         and isinstance(partition, str)
         and bool(partition)
         and account == "sigroup"
@@ -236,6 +243,7 @@ def collect_execution_identity(
         "formal": complete,
         "git_commit": commit if complete else None,
         "image_sha256": image if complete else None,
+        "hf_inventory_sha256": hf_inventory if complete else None,
         "account": account if complete else None,
         "partition": partition if complete else None,
         "gpu_models": gpu_names if complete else [],
@@ -345,10 +353,19 @@ create_run_manifest = build_run_manifest
 def atomic_write_json(
     path: str | os.PathLike[str],
     value: RunManifest | Mapping[str, object],
+    *,
+    overwrite: bool = True,
 ) -> None:
-    """Atomically replace ``path`` with deterministic UTF-8 JSON."""
+    """Atomically write deterministic UTF-8 JSON.
+
+    With ``overwrite=False``, publishing uses a same-directory hard link so an
+    existing path wins atomically and can never be replaced by a concurrent
+    writer.
+    """
 
     destination = Path(path)
+    if not isinstance(overwrite, bool):
+        raise TypeError("overwrite must be bool")
     if not destination.parent.exists():
         raise FileNotFoundError(f"destination directory does not exist: {destination.parent}")
     payload: Mapping[str, object]
@@ -377,7 +394,16 @@ def atomic_write_json(
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_name, destination)
+        if overwrite:
+            os.replace(temporary_name, destination)
+        else:
+            try:
+                os.link(temporary_name, destination)
+            except FileExistsError as error:
+                raise FileExistsError(
+                    f"refusing to overwrite existing JSON: {destination}"
+                ) from error
+            os.unlink(temporary_name)
         temporary_name = None
     finally:
         if temporary_name is not None:
