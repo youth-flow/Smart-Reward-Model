@@ -20,7 +20,10 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from smart_reward.config import config_hash, load_config
-from smart_reward.prompts import prepare_multipref_prompts
+from smart_reward.prompts import (
+    load_multipref_parquet_snapshot,
+    prepare_multipref_prompts,
+)
 from smart_reward.seeding import SeedBundle
 
 
@@ -236,12 +239,13 @@ def _verify_offline_resolution(
     *,
     hub_cache: Path,
     datasets_cache: Path,
+    staged: tuple[tuple[dict[str, str], Path], ...],
 ) -> dict[str, object]:
     for name in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE"):
         if os.environ.get(name) != "1":
             raise RuntimeError(f"offline verification requires {name}=1")
     try:
-        from datasets import DownloadConfig, load_dataset
+        import datasets
         from transformers import AutoConfig, AutoTokenizer
     except ImportError as error:
         raise RuntimeError(
@@ -291,13 +295,22 @@ def _verify_offline_resolution(
     data = config["data"]
     if not isinstance(data, Mapping):
         raise TypeError("data must be a mapping")
-    download_config = DownloadConfig(local_files_only=True)
-    dataset = load_dataset(
+    dataset_identity = (
+        "dataset",
         str(data["prompt_dataset"]),
-        revision=str(data["prompt_revision"]),
-        split="train",
-        cache_dir=str(datasets_cache),
-        download_config=download_config,
+        str(data["prompt_revision"]),
+    )
+    dataset_snapshots = [
+        path
+        for asset, path in staged
+        if (asset["kind"], asset["repo_id"], asset["revision"]) == dataset_identity
+    ]
+    if len(dataset_snapshots) != 1:
+        raise RuntimeError("staged assets do not contain exactly one pinned prompt dataset")
+    dataset = load_multipref_parquet_snapshot(
+        datasets,
+        dataset_snapshots[0],
+        datasets_cache=datasets_cache,
     )
     run = config["run"]
     if not isinstance(run, Mapping):
@@ -443,6 +456,7 @@ def _execute(arguments: argparse.Namespace) -> dict[str, object]:
                 config,
                 hub_cache=hub_cache,
                 datasets_cache=datasets_cache,
+                staged=staged,
             )
     else:
         staged = _stage_snapshots(
@@ -467,6 +481,7 @@ def _execute(arguments: argparse.Namespace) -> dict[str, object]:
                 config,
                 hub_cache=hub_cache,
                 datasets_cache=datasets_cache,
+                staged=staged,
             )
 
     payload = _build_inventory(

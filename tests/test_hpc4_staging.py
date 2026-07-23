@@ -178,16 +178,27 @@ def test_offline_verification_uses_formal_prompt_preparation_and_local_only_data
     staging = _load_staging_module()
     config = load_config(Path(__file__).parents[1] / "configs" / "smoke.yaml")
     rows = [{"prompt_id": f"p-{index}", "text": f"prompt {index}"} for index in range(64)]
-    load_calls: list[dict[str, object]] = []
+    load_calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    dataset_asset = staging._asset_contract(config)[0]
+    dataset_snapshot = (
+        tmp_path / "hub" / "datasets--allenai--multipref" / "snapshots" / dataset_asset["revision"]
+    )
+    parquet = dataset_snapshot / "data" / "train-00000-of-00001.parquet"
+    parquet.parent.mkdir(parents=True)
+    parquet.write_bytes(b"test parquet placeholder")
+    staged = ((dataset_asset, dataset_snapshot),)
 
     class DownloadConfig:
         def __init__(self, *, local_files_only: bool) -> None:
             self.local_files_only = local_files_only
 
-    def load_dataset(*_: object, **kwargs: object) -> list[dict[str, str]]:
-        load_calls.append(kwargs)
+    def load_dataset(*args: object, **kwargs: object) -> list[dict[str, str]]:
+        load_calls.append((args, kwargs))
+        assert args == ("parquet",)
         assert isinstance(kwargs["download_config"], DownloadConfig)
         assert kwargs["download_config"].local_files_only is True
+        assert kwargs["data_files"] == {"train": [str(parquet)]}
+        assert kwargs["split"] == "train"
         return rows
 
     class Factory:
@@ -213,6 +224,7 @@ def test_offline_verification_uses_formal_prompt_preparation_and_local_only_data
             config,
             hub_cache=tmp_path / "hub",
             datasets_cache=tmp_path / "datasets",
+            staged=staged,
         )
 
     prompt_check = evidence["dataset"]["prompt_checks"][0]
@@ -263,4 +275,5 @@ def test_offline_verification_rejects_empty_chat_template(
             config,
             hub_cache=tmp_path / "hub",
             datasets_cache=tmp_path / "datasets",
+            staged=(),
         )

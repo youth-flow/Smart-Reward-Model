@@ -228,7 +228,6 @@ printf '%s  %s\n' "${PRORM_CONFIG_FILE_SHA256}" "${execution_config}" \
   | sha256sum --check --status \
   || die "detached execution config does not match submitted identity"
 
-mkdir "${job_dir}/home"
 command -v flock >/dev/null 2>&1 || die "flock is required for cache serialization"
 exec {cache_lock_fd}> "${PRORM_HF_CACHE}/.stage.lock"
 flock -n "${cache_lock_fd}" \
@@ -253,7 +252,6 @@ apptainer exec --cleanenv \
   --no-mount home,cwd \
   --pwd "${execution_repo}" \
   --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}" \
-  --env "HOME=${job_dir}/home" \
   --env "PYTHONPATH=${execution_repo}/src" \
   --env "PYTHONNOUSERSITE=1" \
   --env "PYTHONDONTWRITEBYTECODE=1" \

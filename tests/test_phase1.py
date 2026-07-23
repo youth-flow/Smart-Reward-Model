@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from smart_reward.config import load_config
 from smart_reward.data import repeated_labels_to_h
 from smart_reward.oracle import fit_robust_oracle_transform
 from smart_reward.phase1 import (
+    _load_prompts,
     _reward_class_projection_diagnostic,
     assemble_controlled_experiment,
     materialize_phase1,
@@ -318,6 +320,65 @@ def test_materializer_reports_missing_optional_dependency_without_download(
             device="cpu",
         )
     assert not (tmp_path / "new-artifact").exists()
+
+
+def test_formal_prompt_loader_resolves_snapshot_then_reads_local_parquet(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = load_config(Path("configs/smoke.yaml"))
+    revision = config["data"]["prompt_revision"]
+    snapshot = tmp_path / "hub" / "datasets--allenai--multipref" / "snapshots" / revision
+    parquet = snapshot / "data" / "train-00000-of-00001.parquet"
+    parquet.parent.mkdir(parents=True)
+    parquet.write_bytes(b"test parquet placeholder")
+    rows = [{"prompt_id": f"p-{index}", "text": f"prompt {index}"} for index in range(64)]
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class DownloadConfig:
+        def __init__(self, *, local_files_only: bool) -> None:
+            self.local_files_only = local_files_only
+
+    def load_dataset(*args: object, **kwargs: object):
+        calls.append((args, kwargs))
+        return rows
+
+    datasets = SimpleNamespace(DownloadConfig=DownloadConfig, load_dataset=load_dataset)
+    hub = SimpleNamespace(
+        snapshot_download=lambda **kwargs: (
+            snapshot
+            if kwargs
+            == {
+                "repo_id": "allenai/multipref",
+                "repo_type": "dataset",
+                "revision": revision,
+                "cache_dir": str(tmp_path / "hub"),
+                "local_files_only": True,
+                "token": False,
+            }
+            else (_ for _ in ()).throw(AssertionError(kwargs))
+        )
+    )
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets"))
+    monkeypatch.setattr(
+        "smart_reward.phase1._require_module",
+        lambda name: (
+            hub if name == "huggingface_hub" else (_ for _ in ()).throw(AssertionError(name))
+        ),
+    )
+
+    prompts = _load_prompts(
+        datasets,
+        config,
+        split_seed=123,
+        local_files_only=True,
+    )
+
+    assert len(prompts) == 64
+    assert calls[0][0] == ("parquet",)
+    assert calls[0][1]["data_files"] == {"train": [str(parquet)]}
+    assert calls[0][1]["download_config"].local_files_only is True
 
 
 def test_producer_identity_reads_only_validated_digest_fields(

@@ -58,7 +58,12 @@ from .oracle import (
     btl_probabilities,
     fit_robust_oracle_transform,
 )
-from .prompts import PromptRecord, prepare_multipref_prompts, save_prompt_jsonl
+from .prompts import (
+    PromptRecord,
+    load_multipref_parquet_snapshot,
+    prepare_multipref_prompts,
+    save_prompt_jsonl,
+)
 from .scores import per_sample_scores
 from .seeding import SeedBundle, derive_seed
 
@@ -583,18 +588,33 @@ def _load_prompts(
 ) -> list[PromptRecord]:
     data_config = config["data"]
     run_config = config["run"]
-    kwargs: dict[str, Any] = {
-        "revision": data_config["prompt_revision"],
-        "split": "train",
-    }
-    if local_files_only:
-        download_config_type = getattr(datasets, "DownloadConfig", None)
-        if download_config_type is None:
-            raise RuntimeError("installed datasets package does not expose DownloadConfig")
-        kwargs["download_config"] = download_config_type(local_files_only=True)
     try:
-        rows = datasets.load_dataset(data_config["prompt_dataset"], **kwargs)
-    except (OSError, FileNotFoundError, ConnectionError) as error:
+        if local_files_only:
+            huggingface_hub = _require_module("huggingface_hub")
+            snapshot = Path(
+                huggingface_hub.snapshot_download(
+                    repo_id=data_config["prompt_dataset"],
+                    repo_type="dataset",
+                    revision=data_config["prompt_revision"],
+                    cache_dir=os.environ.get("HF_HUB_CACHE"),
+                    local_files_only=True,
+                    token=False,
+                )
+            )
+            if snapshot.name != data_config["prompt_revision"]:
+                raise RuntimeError("local dataset snapshot resolved to an unexpected revision")
+            rows = load_multipref_parquet_snapshot(
+                datasets,
+                snapshot,
+                datasets_cache=os.environ.get("HF_DATASETS_CACHE"),
+            )
+        else:
+            rows = datasets.load_dataset(
+                data_config["prompt_dataset"],
+                revision=data_config["prompt_revision"],
+                split="train",
+            )
+    except (OSError, FileNotFoundError, ConnectionError, RuntimeError) as error:
         if local_files_only:
             raise _local_snapshot_error(
                 "dataset",

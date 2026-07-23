@@ -154,6 +154,43 @@ def prepare_multipref_prompts(
     return records
 
 
+def load_multipref_parquet_snapshot(
+    datasets_module: Any,
+    snapshot_path: str | os.PathLike[str],
+    *,
+    datasets_cache: str | os.PathLike[str] | None = None,
+) -> Any:
+    """Load the pinned MultiPref train parquet without any Hub metadata call.
+
+    ``datasets.load_dataset(repo_id, local_files_only=True)`` still consults
+    Hub metadata in Datasets 3.6.  Formal jobs instead resolve the immutable
+    dataset snapshot with ``huggingface_hub`` and pass its local parquet shards
+    through this function.
+    """
+
+    snapshot = Path(snapshot_path).resolve(strict=True)
+    if not snapshot.is_dir():
+        raise NotADirectoryError(f"MultiPref snapshot is not a directory: {snapshot}")
+    train_files = sorted(
+        (path for path in (snapshot / "data").glob("train-*.parquet") if path.is_file()),
+        key=lambda path: path.name,
+    )
+    if not train_files:
+        raise FileNotFoundError(f"MultiPref snapshot has no train parquet shards: {snapshot}")
+    download_config_type = getattr(datasets_module, "DownloadConfig", None)
+    load_dataset = getattr(datasets_module, "load_dataset", None)
+    if download_config_type is None or not callable(load_dataset):
+        raise RuntimeError("installed datasets package lacks the required loading interface")
+    kwargs: dict[str, Any] = {
+        "data_files": {"train": [str(path) for path in train_files]},
+        "download_config": download_config_type(local_files_only=True),
+        "split": "train",
+    }
+    if datasets_cache is not None:
+        kwargs["cache_dir"] = str(Path(datasets_cache).resolve())
+    return load_dataset("parquet", **kwargs)
+
+
 def load_multipref_prompts(
     *,
     dataset_name: str,
@@ -231,6 +268,7 @@ __all__ = [
     "PROMPT_SCHEMA_VERSION",
     "ChatMessage",
     "PromptRecord",
+    "load_multipref_parquet_snapshot",
     "load_multipref_prompts",
     "load_prompt_jsonl",
     "prepare_multipref_prompts",

@@ -231,13 +231,11 @@ assert_execution_checkout() {
 }
 assert_execution_checkout
 
-mkdir "${job_dir}/home"
 container=(
   apptainer exec --cleanenv --nv
   --no-mount home,cwd
   --pwd "${repo_root}"
   --bind "${job_dir}:${job_dir},${PRORM_HF_CACHE}:${PRORM_HF_CACHE}"
-  --env "HOME=${job_dir}/home"
   --env "PYTHONPATH=${repo_root}/src"
   --env "PYTHONNOUSERSITE=1"
   --env "PYTHONDONTWRITEBYTECODE=1"

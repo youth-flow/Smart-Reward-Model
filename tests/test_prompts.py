@@ -1,9 +1,11 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from smart_reward.prompts import (
     PromptRecord,
+    load_multipref_parquet_snapshot,
     load_prompt_jsonl,
     prepare_multipref_prompts,
     save_prompt_jsonl,
@@ -60,3 +62,39 @@ def test_prompt_jsonl_roundtrip_and_duplicate_guard(tmp_path) -> None:
     duplicated.write_text(f"{payload}\n{payload}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate prompt_id"):
         load_prompt_jsonl(duplicated)
+
+
+def test_multipref_snapshot_loader_uses_only_local_train_parquet(tmp_path) -> None:
+    snapshot = tmp_path / "snapshots" / ("a" * 40)
+    first = snapshot / "data" / "train-00001-of-00002.parquet"
+    second = snapshot / "data" / "train-00000-of-00002.parquet"
+    first.parent.mkdir(parents=True)
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    cache = tmp_path / "datasets"
+    calls = []
+
+    class DownloadConfig:
+        def __init__(self, *, local_files_only: bool) -> None:
+            self.local_files_only = local_files_only
+
+    def load_dataset(*args, **kwargs):
+        calls.append((args, kwargs))
+        return ["rows"]
+
+    datasets_module = SimpleNamespace(
+        DownloadConfig=DownloadConfig,
+        load_dataset=load_dataset,
+    )
+    assert load_multipref_parquet_snapshot(
+        datasets_module,
+        snapshot,
+        datasets_cache=cache,
+    ) == ["rows"]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == ("parquet",)
+    assert kwargs["data_files"] == {"train": [str(second), str(first)]}
+    assert kwargs["split"] == "train"
+    assert kwargs["cache_dir"] == str(cache.resolve())
+    assert kwargs["download_config"].local_files_only is True
