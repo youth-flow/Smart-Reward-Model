@@ -42,7 +42,7 @@ def test_definition_locks_base_and_forbids_dependency_resolution() -> None:
     definition = (ROOT / "containers" / "prorm-hpc4.def").read_text(encoding="utf-8")
 
     assert BASE_DIGEST in definition
-    assert "pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime@" in definition
+    assert f"From: docker.io/pytorch/pytorch@{BASE_DIGEST}" in definition
     assert "--only-binary=:all: --no-deps" in definition
     assert "--no-deps --no-build-isolation /opt/prorm" in definition
     assert "python -m pip check" in definition
