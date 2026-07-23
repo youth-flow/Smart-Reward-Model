@@ -46,8 +46,9 @@ objective:
   beta: 1.0
   damping_relative_to_mean_fisher_diagonal: 0.001
   damping_sensitivity_multipliers: [0.1, 1.0, 10.0]
+  pcg_dtype: float64
   pcg_tolerance: 1.0e-5
-  pcg_max_iterations: 2048
+  pcg_max_iterations: 8192
 
 reward_model:
   model: Qwen/Qwen2.5-0.5B-Instruct

@@ -8,7 +8,11 @@ from dataclasses import dataclass
 
 import torch
 
-from .linear import fisher_matvec as score_fisher_matvec
+from .linear import (
+    DampedEmpiricalFisher,
+    FisherSolveDType,
+    resolve_fisher_solve_dtype,
+)
 from .pcg import pcg
 
 
@@ -152,6 +156,46 @@ def _validate_damping_beta(damping: float, beta: float = 1.0) -> tuple[float, fl
     return damping_value, beta_value
 
 
+def _promote_policy_geometry(
+    score_matrix: torch.Tensor,
+    rewards: tuple[torch.Tensor, ...],
+    *,
+    pcg_dtype: FisherSolveDType,
+    fisher_matrix: torch.Tensor | None,
+    fisher_operator: Callable[[torch.Tensor], torch.Tensor] | None,
+    fisher_diagonal: torch.Tensor | None,
+) -> tuple[
+    torch.Tensor,
+    tuple[torch.Tensor, ...],
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
+    """Promote built-in Fisher computations to an FP64 numerical workspace.
+
+    A caller-supplied operator owns its dtype contract and is therefore left
+    untouched.  The default score Fisher and explicit Fisher matrices are
+    fixed tensors, so promoting them removes the FP32 true-residual floor
+    observed for the formal high-dimensional geometry.
+    """
+
+    solve_dtype = resolve_fisher_solve_dtype(pcg_dtype)
+    if fisher_operator is not None:
+        if score_matrix.dtype != solve_dtype or any(
+            value.dtype != solve_dtype for value in rewards
+        ):
+            raise ValueError(
+                "a caller-supplied fisher_operator requires score/reward inputs "
+                "already expressed in pcg_dtype"
+            )
+        return score_matrix, rewards, fisher_matrix, fisher_diagonal
+    return (
+        score_matrix.to(dtype=solve_dtype),
+        tuple(value.to(dtype=solve_dtype) for value in rewards),
+        None if fisher_matrix is None else fisher_matrix.to(dtype=solve_dtype),
+        None if fisher_diagonal is None else fisher_diagonal.to(dtype=solve_dtype),
+    )
+
+
 def _resolve_fisher_geometry(
     flat_scores: torch.Tensor,
     *,
@@ -180,8 +224,9 @@ def _resolve_fisher_geometry(
         return lambda vector: fisher_matrix @ vector, torch.diagonal(fisher_matrix)
 
     if fisher_operator is None:
+        operator = DampedEmpiricalFisher(flat_scores, damping=0.0)
         return (
-            lambda vector: score_fisher_matvec(vector, flat_scores, damping=0.0),
+            operator.matvec,
             # The default empirical Fisher is low rank plus isotropic damping.
             # Retaining that spectrum is substantially better conditioned for
             # CG than applying a coordinate-wise Jacobi rescaling.
@@ -264,6 +309,7 @@ def local_regret(
     candidate_dim: int = -1,
     pcg_tolerance: float = 1.0e-5,
     pcg_max_iterations: int = 100,
+    pcg_dtype: FisherSolveDType = "float64",
     fisher_matrix: torch.Tensor | None = None,
     fisher_operator: Callable[[torch.Tensor], torch.Tensor] | None = None,
     fisher_diagonal: torch.Tensor | None = None,
@@ -291,6 +337,21 @@ def local_regret(
     ):
         raise ValueError("predicted_rewards and target_rewards must share dtype and device")
 
+    (
+        score_matrix,
+        promoted_rewards,
+        fisher_matrix,
+        fisher_diagonal,
+    ) = _promote_policy_geometry(
+        score_matrix,
+        (predicted_rewards, target_rewards),
+        pcg_dtype=pcg_dtype,
+        fisher_matrix=fisher_matrix,
+        fisher_operator=fisher_operator,
+        fisher_diagonal=fisher_diagonal,
+    )
+    predicted_rewards, target_rewards = promoted_rewards
+    flat_scores, _ = _validate_metric_inputs(score_matrix, predicted_rewards)
     error = predicted_rewards - target_rewards
     moment = policy_reward_moment(
         score_matrix,
@@ -331,6 +392,7 @@ def natural_direction(
     candidate_dim: int = -1,
     pcg_tolerance: float = 1.0e-5,
     pcg_max_iterations: int = 100,
+    pcg_dtype: FisherSolveDType = "float64",
     fisher_matrix: torch.Tensor | None = None,
     fisher_operator: Callable[[torch.Tensor], torch.Tensor] | None = None,
     fisher_diagonal: torch.Tensor | None = None,
@@ -338,6 +400,15 @@ def natural_direction(
     """Return ``(F + damping I)^-1 A_hat r``."""
 
     damping_value, _ = _validate_damping_beta(damping)
+    score_matrix, promoted_rewards, fisher_matrix, fisher_diagonal = _promote_policy_geometry(
+        score_matrix,
+        (rewards,),
+        pcg_dtype=pcg_dtype,
+        fisher_matrix=fisher_matrix,
+        fisher_operator=fisher_operator,
+        fisher_diagonal=fisher_diagonal,
+    )
+    (rewards,) = promoted_rewards
     flat_scores, _ = _validate_metric_inputs(score_matrix, rewards)
     moment = policy_reward_moment(
         score_matrix,
@@ -383,6 +454,7 @@ def natural_direction_metrics(
     candidate_dim: int = -1,
     pcg_tolerance: float = 1.0e-5,
     pcg_max_iterations: int = 100,
+    pcg_dtype: FisherSolveDType = "float64",
     fisher_matrix: torch.Tensor | None = None,
     fisher_operator: Callable[[torch.Tensor], torch.Tensor] | None = None,
     fisher_diagonal: torch.Tensor | None = None,
@@ -404,6 +476,20 @@ def natural_direction_metrics(
     ):
         raise ValueError("predicted_rewards and target_rewards must share dtype and device")
 
+    (
+        score_matrix,
+        promoted_rewards,
+        fisher_matrix,
+        fisher_diagonal,
+    ) = _promote_policy_geometry(
+        score_matrix,
+        (predicted_rewards, target_rewards),
+        pcg_dtype=pcg_dtype,
+        fisher_matrix=fisher_matrix,
+        fisher_operator=fisher_operator,
+        fisher_diagonal=fisher_diagonal,
+    )
+    predicted_rewards, target_rewards = promoted_rewards
     predicted_direction = natural_direction(
         score_matrix,
         predicted_rewards,
@@ -412,6 +498,7 @@ def natural_direction_metrics(
         candidate_dim=candidate_dim,
         pcg_tolerance=pcg_tolerance,
         pcg_max_iterations=pcg_max_iterations,
+        pcg_dtype=pcg_dtype,
         fisher_matrix=fisher_matrix,
         fisher_operator=fisher_operator,
         fisher_diagonal=fisher_diagonal,
@@ -424,6 +511,7 @@ def natural_direction_metrics(
         candidate_dim=candidate_dim,
         pcg_tolerance=pcg_tolerance,
         pcg_max_iterations=pcg_max_iterations,
+        pcg_dtype=pcg_dtype,
         fisher_matrix=fisher_matrix,
         fisher_operator=fisher_operator,
         fisher_diagonal=fisher_diagonal,

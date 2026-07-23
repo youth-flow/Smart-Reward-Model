@@ -46,3 +46,22 @@ def test_pcg_rejects_observed_non_spd_curvature() -> None:
     rhs = torch.tensor([1.0, -2.0], dtype=torch.float64)
     with pytest.raises(PCGBreakdownError, match="not SPD"):
         pcg(lambda vector: -vector, rhs)
+
+
+def test_pcg_convergence_is_certified_by_the_true_residual() -> None:
+    diagonal = torch.logspace(0.0, -6.0, 32, dtype=torch.float32)
+    rhs = torch.ones(32, dtype=torch.float32)
+    result = pcg(
+        lambda vector: diagonal * vector,
+        rhs,
+        max_iterations=500,
+        tolerance=1.0e-5,
+        residual_recompute_interval=20,
+    )
+    true_relative_residual = float(
+        (torch.linalg.vector_norm(rhs - diagonal * result.solution) / rhs.norm()).item()
+    )
+
+    assert result.converged
+    assert true_relative_residual <= 1.0e-5
+    assert result.relative_residual == pytest.approx(true_relative_residual, rel=1.0e-6)

@@ -23,10 +23,9 @@ from smart_reward.training import (
 )
 
 
-def _misspecified_toy() -> FeatureTrainingBatch:
+def _misspecified_toy(dtype: torch.dtype = torch.float64) -> FeatureTrainingBatch:
     """A true edge target outside the two-dimensional reward feature span."""
 
-    dtype = torch.float64
     feature_differences = torch.tensor(
         [
             [1.0, 0.0],
@@ -253,8 +252,8 @@ def test_prorm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) ->
     dual_calls: list[tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]] = []
     original_solve = training_module._solve_prorm_dual
 
-    def counted_solve(batch_arg, margins, config, warm_start):
-        result = original_solve(batch_arg, margins, config, warm_start)
+    def counted_solve(batch_arg, margins, config, warm_start, geometry=None):
+        result = original_solve(batch_arg, margins, config, warm_start, geometry)
         dual_calls.append(
             (
                 margins.detach().clone(),
@@ -277,6 +276,32 @@ def test_prorm_refreshes_dual_once_before_every_optimizer_update(monkeypatch) ->
     assert not torch.equal(dual_calls[0][0], dual_calls[1][0])
     assert torch.equal(dual_calls[1][1], dual_calls[0][2])
     assert torch.equal(dual_calls[2][1], dual_calls[1][2])
+
+
+def test_prorm_uses_fp64_policy_geometry_with_fp32_reward_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batch = _misspecified_toy(torch.float32)
+    model = FrozenFeatureLinearReward(2, dtype=torch.float32)
+    original_pcg = training_module.pcg
+    observed_rhs_dtypes: list[torch.dtype] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_rhs_dtypes.append(args[1].dtype)
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(training_module, "pcg", recording_pcg)
+    trainer = ProRMPlusTrainer(model, batch, _prorm_config())
+    diagnostic = trainer.step()
+
+    assert observed_rhs_dtypes == [torch.float64]
+    assert trainer.dual_direction is not None
+    assert trainer.dual_direction.dtype == torch.float64
+    assert trainer._policy_geometry.edge_scores.dtype == torch.float64
+    assert trainer._policy_geometry.node_scores.dtype == torch.float64
+    assert model.weight.dtype == torch.float32
+    assert model.weight.grad is not None and model.weight.grad.dtype == torch.float32
+    assert diagnostic.pcg_converged
 
 
 def test_global_orientation_swap_preserves_both_objectives_and_updates() -> None:
@@ -416,7 +441,7 @@ def test_in_memory_checkpoint_roundtrip_has_deterministic_continuation(kind: str
         assert torch.equal(first.dual_direction, restored.dual_direction)
 
 
-def test_prorm_trainer_reads_legacy_v1_checkpoint() -> None:
+def test_prorm_trainer_reads_v1_name_with_current_numerical_config() -> None:
     batch = _misspecified_toy()
     config = _prorm_config()
     source = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
@@ -431,6 +456,34 @@ def test_prorm_trainer_reads_legacy_v1_checkpoint() -> None:
     assert torch.equal(restored.model.weight, source.model.weight)
     assert torch.equal(restored.dual_direction, source.dual_direction)
     assert restored.history == source.history
+
+
+def test_prorm_trainer_rejects_pre_fp64_checkpoint_config() -> None:
+    batch = _misspecified_toy()
+    config = _prorm_config()
+    source = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    source.step()
+    legacy = copy.deepcopy(source.state_dict())
+    legacy["format_version"] = 1
+    legacy["trainer"] = "srm_plus"
+    legacy["config"].pop("pcg_dtype")
+
+    restored = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    with pytest.raises(ValueError, match="checkpoint config"):
+        restored.load_state_dict(legacy)
+
+
+def test_prorm_checkpoint_rejects_non_solver_dtype_dual_direction() -> None:
+    batch = _misspecified_toy()
+    config = _prorm_config()
+    source = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    source.step()
+    checkpoint = source.state_dict()
+    checkpoint["dual_direction"] = checkpoint["dual_direction"].to(torch.float32)
+
+    restored = ProRMPlusTrainer(FrozenFeatureLinearReward(2, dtype=torch.float64), batch, config)
+    with pytest.raises(ValueError, match="solver dtype"):
+        restored.load_state_dict(checkpoint)
 
 
 def test_prorm_diagnostics_include_residual_dual_value_and_gradient_norm() -> None:

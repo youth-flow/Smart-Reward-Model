@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 import smart_reward.metrics as metrics_module
@@ -24,6 +25,38 @@ def test_default_score_fisher_solve_is_unpreconditioned(monkeypatch) -> None:
     natural_direction(scores, rewards, damping=0.2)
 
     assert observed_preconditioners == [None]
+
+
+def test_default_fp32_metric_geometry_is_solved_in_fp64(
+    monkeypatch,
+) -> None:
+    original_pcg = metrics_module.pcg
+    observed_rhs_dtypes: list[torch.dtype] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_rhs_dtypes.append(args[1].dtype)
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "pcg", recording_pcg)
+    scores = torch.tensor([[[1.0, 0.0], [-1.0, 1.0], [0.5, -0.5]]])
+    rewards = torch.tensor([[1.0, -0.5, 0.25]])
+    direction = natural_direction(scores, rewards, damping=0.2)
+
+    assert observed_rhs_dtypes == [torch.float64]
+    assert direction.dtype == torch.float64
+
+
+def test_external_fisher_operator_must_honor_solver_dtype() -> None:
+    scores = torch.tensor([[[1.0, 0.0], [-1.0, 1.0], [0.5, -0.5]]])
+    rewards = torch.tensor([[1.0, -0.5, 0.25]])
+
+    with pytest.raises(ValueError, match="already expressed in pcg_dtype"):
+        natural_direction(
+            scores,
+            rewards,
+            damping=0.2,
+            fisher_operator=lambda vector: vector,
+        )
 
 
 def test_gauge_centering_removes_per_prompt_constants() -> None:

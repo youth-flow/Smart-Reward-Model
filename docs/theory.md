@@ -601,11 +601,23 @@ $$
 u\longmapsto\frac1{n_F}S^\top(Su)+\lambda u,
 $$
 
-无需形成 `d x d` Fisher。这里的系统是 rank 至多 `n_F` 的 empirical Fisher 加 isotropic
-damping；unpreconditioned CG 保留其“低秩 + 重复 `lambda` 特征值”结构。坐标级 Jacobi scaling
-会把这个重复特征值打散，因此 controlled path 明确不使用 Jacobi。主配置固定 relative
-tolerance `1e-5`、最多 2048 iterations；上限只是 fail-closed ceiling，达到容差就立即停止。
-最终 evidence 保存真实 `rhs-Ax` residual；未收敛是 fail-closed condition，不是 warning。
+无需形成 `d x d` Fisher。artifact 中的 `S`、`Z`、`h` 仍以 FP32 保存；进入固定 policy
+geometry 后，`S/Z/h`、`m_hat`、absolute damping、Fisher matvec、全部 Krylov state、dot/norm
+和 true residual 统一提升为 config-locked FP64。Qwen/Skywork forward、冻结 reward feature、
+reward head、autograd 与 AdamW 仍为 FP32。
+
+这里的系统是 rank 至多 `n_F` 的 empirical Fisher 加 isotropic damping；unpreconditioned CG
+保留其“低秩 + 重复 `lambda` 特征值”结构。坐标级 Jacobi scaling 会把这个重复特征值打散，
+因此 controlled path 明确不使用 Jacobi。main train Fisher 有 `1536*4=6144` 个 node，精确
+算术中的 Krylov 上界至多是 `rank(S)+1<=6145`；main ceiling 因而取 `8192`，smoke 的
+`48*4+1=193` 下界由其 `2048` ceiling 覆盖。rank 上界只说明 ceiling 的规模充分性，不保证
+有限精度收敛。
+
+relative tolerance 固定为 `1e-5`。recursive residual 只用于 CG recurrence；每 20 次迭代及
+recursive residual 首次过门时显式计算 `r_true=rhs-Ax`。只有 `||r_true||<=rtol||rhs||`
+才允许 `converged`；若 recursive residual 假性过门，则从 `r_true` 显式 restart，禁止替换
+residual 后沿用旧 Krylov direction。达到 ceiling 时同样以 true residual 作最终判定。
+未收敛是 fail-closed condition，不是 warning。
 
 ### 7.2 三个 scalar 必须分开
 
@@ -655,6 +667,10 @@ $$
 最优 `v` 时，saddle value 等于 reported value；PCG 近似时两者可能不同。仓库分别记录
 reported quadratic、saddle diagnostic 和 training surrogate，禁止混用。
 
+实现中 `v` 与 `z_i^T v/(2 beta)` 在 FP64 policy geometry 内计算；这些 scalar envelope
+weights 只在进入 FP32 reward-head autograd 前转换一次。该 precision boundary 不改变上述
+梯度，只避免把整个 reward learner 与 AdamW 无必要地改成 FP64。
+
 ### 7.3 外层更新顺序
 
 每次 optimizer update 固定执行：
@@ -662,7 +678,7 @@ reported quadratic、saddle diagnostic 和 training surrogate，禁止混用。
 ```text
 all training-edge margins
   -> one full moment m_hat
-  -> warm-started PCG solve
+  -> warm-started FP64 PCG with true-residual acceptance
   -> detach v
   -> microbatch accumulation of one full-data envelope gradient
   -> exactly one optimizer step
@@ -686,7 +702,8 @@ $$
 $$
 
 Covariance 的无偏分母是 `P(M-1)`；held-out node Fisher 仍用 `PM`。每个 split 从自身 Fisher
-独立解析 absolute damping。主要 geometry metrics 是：
+独立解析 absolute damping，并继承与训练完全相同的 `pcg_dtype/tolerance/ceiling`。主要
+geometry metrics 是：
 
 1. reward moment error 的 held-out ridge local-regret proxy；
 2. predicted 与 target damped natural directions 的 undamped-Fisher squared error；
@@ -707,7 +724,9 @@ preference geometry 与 policy geometry 是否出现预期分离，不能替代 
 
 ### 8.3 Matched measured-KL policy optimization
 
-分别由 BT-MLE 与 ProRM+ reward moments 构造 natural direction。Fisher quadratic
+分别由 BT-MLE 与 ProRM+ reward moments 构造 FP64 natural direction，并以 FP64 train
+Fisher 计算 quadratic 初值；只有真正写入 FP32 LoRA-B 参数时才按参数 dtype 转换。Fisher
+quadratic
 
 $$
 \alpha_{\mathrm{init}}
@@ -736,6 +755,7 @@ zero-B、BT-MLE update 与 ProRM+ update 的 transformed-oracle reward improveme
 | `N` is independent with correct survival law | Randomized estimator becomes biased | Named RNG streams; no clipping or silent resampling |
 | Rewards and scores have sufficient moments | Fisher/moment variance can diverge | Bounded oracle transform; probability floor |
 | Train and evaluation targets are isolated | Target leakage invalidates comparison | Train tensor schema cannot contain true rewards |
+| FP32 Krylov reaches a residual floor or recursive/true residual diverge | A numerically invalid direction could be reported as converged | FP64 policy geometry; explicit true-residual gate; false crossing restarts |
 | PCG and measured-KL search converge | Direction or step size is undefined | Fail closed; failed seed cannot be discarded |
 | Measured KL is locally bracketable on the positive ray | Bisection cannot locate target | Accept only measured KL within tolerance |
 

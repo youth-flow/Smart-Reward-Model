@@ -49,6 +49,7 @@ from .contracts import (
 from .data import CandidateNode, load_jsonl
 from .experiment import ControlledFeatureExperiment
 from .hf import ExactTokenCandidates, FixedALoRASetup
+from .linear import resolve_fisher_solve_dtype
 from .oracle import RobustOracleTransform
 from .paths import relative_posix_reference
 from .prompts import PromptRecord, load_prompt_jsonl
@@ -1256,6 +1257,7 @@ def evaluate_matched_kl_rollouts(
             head,
             relative_damping=float(objective["damping_relative_to_mean_fisher_diagonal"]),
             beta=float(objective["beta"]),
+            pcg_dtype=objective["pcg_dtype"],
             pcg_max_iterations=int(objective["pcg_max_iterations"]),
             pcg_tolerance=float(objective["pcg_tolerance"]),
             require_pcg_convergence=True,
@@ -1284,6 +1286,11 @@ def evaluate_matched_kl_rollouts(
         raise RuntimeError("reloaded policy chat template does not match Phase 1")
     _zero_b_(policy_runtime.setup)
     zero_b_sha = _hf._fingerprint_named_tensors(policy_runtime.setup.named_tangent_parameters())
+    solve_dtype = resolve_fisher_solve_dtype(objective["pcg_dtype"])
+    train_node_scores = experiment.train.policy_scores.to(
+        device=target_device,
+        dtype=solve_dtype,
+    )
     selected_probes, reference_candidates = select_and_pad_kl_probe_candidates(
         candidates,
         experiment.train.prompt_ids,
@@ -1318,7 +1325,8 @@ def evaluate_matched_kl_rollouts(
             ):
                 raise RuntimeError("LoRA-B did not return to the common zero origin")
             direction = direction_results[learner].direction.to(
-                device=target_device, dtype=torch.float32
+                device=target_device,
+                dtype=solve_dtype,
             )
             update = match_fixed_a_measured_kl(
                 policy_runtime.setup.model,
@@ -1326,9 +1334,7 @@ def evaluate_matched_kl_rollouts(
                 reference_candidates,
                 direction,
                 target_kl=float(normalized["evaluation"]["kl_budget"]),
-                train_node_scores=experiment.train.policy_scores.to(
-                    device=target_device, dtype=torch.float32
-                ),
+                train_node_scores=train_node_scores,
                 relative_tolerance=float(normalized["evaluation"]["kl_relative_tolerance"]),
             )
             if not update.converged or not update.applied:
@@ -1352,7 +1358,7 @@ def evaluate_matched_kl_rollouts(
         _zero_b_(policy_runtime.setup)
 
     # The oracle and policy never coexist after this boundary.
-    del reference_candidates, policy_runtime
+    del direction, reference_candidates, train_node_scores, policy_runtime
     gc.collect()
     if target_device.type == "cuda":
         torch.cuda.empty_cache()

@@ -21,26 +21,26 @@ from smart_reward.rollout import (
 from smart_reward.scores import ParameterLayout
 
 
-def _training_data() -> TrainingTensorData:
+def _training_data(dtype: torch.dtype = torch.float64) -> TrainingTensorData:
     policy_scores = torch.tensor(
         [
             [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.5]],
             [[0.5, -1.0], [1.5, 0.5], [-0.5, 1.0]],
         ],
-        dtype=torch.float64,
+        dtype=dtype,
     )
     reward_features = torch.tensor(
         [
             [[1.0, 2.0], [0.0, -1.0], [2.0, 0.5]],
             [[-1.0, 1.0], [1.5, 0.0], [0.5, 2.0]],
         ],
-        dtype=torch.float64,
+        dtype=dtype,
     )
     return TrainingTensorData(
         prompt_ids=("p0", "p1"),
         policy_scores=policy_scores,
         reward_features=reward_features,
-        h=torch.zeros(2, dtype=torch.float64),
+        h=torch.zeros(2, dtype=dtype),
         left_wins=torch.tensor([1, 1], dtype=torch.int64),
         num_annotations=torch.tensor([2, 2], dtype=torch.int64),
     )
@@ -102,6 +102,27 @@ def test_policy_direction_preserves_low_rank_plus_damping_krylov_structure(
     )
 
     assert observed_preconditioners == [None]
+
+
+def test_policy_direction_promotes_fp32_geometry_to_fp64(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_pcg = rollout_module.pcg
+    observed_rhs_dtypes: list[torch.dtype] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_rhs_dtypes.append(args[1].dtype)
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(rollout_module, "pcg", recording_pcg)
+    result = policy_direction_from_head(
+        _training_data(torch.float32),
+        torch.tensor([0.7, -0.2]),
+        relative_damping=0.3,
+    )
+
+    assert observed_rhs_dtypes == [torch.float64]
+    assert result.direction.dtype == torch.float64
 
 
 class _TinyFixedAPolicy(nn.Module):

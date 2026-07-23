@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 
 from .contracts import BT_MLE, PRORM_PLUS, canonical_method
+from .linear import FisherSolveDType, resolve_fisher_solve_dtype
 from .metrics import local_regret, natural_direction_metrics
 from .training import (
     BTMLETrainer,
@@ -325,6 +326,7 @@ class FeatureExperimentConfig:
     learning_rate: float = 1.0e-2
     beta: float = 1.0
     relative_damping: float = 1.0e-3
+    pcg_dtype: FisherSolveDType = "float64"
     pcg_max_iterations: int = 200
     pcg_tolerance: float = 1.0e-5
     pcg_absolute_tolerance: float = 0.0
@@ -338,6 +340,7 @@ class FeatureExperimentConfig:
         _finite_positive("learning_rate", self.learning_rate)
         _finite_positive("beta", self.beta)
         _finite_positive("relative_damping", self.relative_damping)
+        resolve_fisher_solve_dtype(self.pcg_dtype)
         _positive_integer("pcg_max_iterations", self.pcg_max_iterations)
         _finite_positive("pcg_tolerance", self.pcg_tolerance)
         absolute_tolerance = float(self.pcg_absolute_tolerance)
@@ -502,8 +505,14 @@ class FeatureExperimentResult:
         return asdict(self)
 
 
-def _absolute_damping(policy_scores: torch.Tensor, relative_damping: float) -> float:
-    flat_scores = policy_scores.reshape(-1, policy_scores.shape[-1])
+def _absolute_damping(
+    policy_scores: torch.Tensor,
+    relative_damping: float,
+    pcg_dtype: FisherSolveDType,
+) -> float:
+    flat_scores = policy_scores.reshape(-1, policy_scores.shape[-1]).to(
+        dtype=resolve_fisher_solve_dtype(pcg_dtype)
+    )
     fisher_diagonal = flat_scores.square().mean(dim=0)
     scale = float(fisher_diagonal.mean().item())
     if not math.isfinite(scale) or scale <= 0.0:
@@ -532,7 +541,11 @@ def _heldout_metrics(
     config: FeatureExperimentConfig,
 ) -> HeldOutPolicyMetrics:
     predicted_rewards = model(split.reward_features)
-    damping = _absolute_damping(split.policy_scores, config.relative_damping)
+    damping = _absolute_damping(
+        split.policy_scores,
+        config.relative_damping,
+        config.pcg_dtype,
+    )
     regret = local_regret(
         split.policy_scores,
         predicted_rewards,
@@ -541,6 +554,7 @@ def _heldout_metrics(
         beta=config.beta,
         pcg_tolerance=config.pcg_tolerance,
         pcg_max_iterations=config.pcg_max_iterations,
+        pcg_dtype=config.pcg_dtype,
     )
     directions = natural_direction_metrics(
         split.policy_scores,
@@ -549,6 +563,7 @@ def _heldout_metrics(
         damping=damping,
         pcg_tolerance=config.pcg_tolerance,
         pcg_max_iterations=config.pcg_max_iterations,
+        pcg_dtype=config.pcg_dtype,
     )
     raw_cosine = float(directions.fisher_cosine.item())
     cosine = raw_cosine if math.isfinite(raw_cosine) else None
@@ -620,7 +635,11 @@ class FeatureExperimentRunner:
         train = self.experiment.train
         config = self.config
         training_batch = train.to_training_batch()
-        train_damping = _absolute_damping(train.policy_scores, config.relative_damping)
+        train_damping = _absolute_damping(
+            train.policy_scores,
+            config.relative_damping,
+            config.pcg_dtype,
+        )
 
         zero = torch.zeros(
             train.reward_dimension,
@@ -658,6 +677,7 @@ class FeatureExperimentRunner:
                 max_grad_norm=config.max_grad_norm,
                 beta=config.beta,
                 damping=train_damping,
+                pcg_dtype=config.pcg_dtype,
                 pcg_max_iterations=config.pcg_max_iterations,
                 pcg_tolerance=config.pcg_tolerance,
                 pcg_absolute_tolerance=config.pcg_absolute_tolerance,
@@ -745,6 +765,7 @@ def compile_feature_experiment_config(
         relative_damping=(
             float(objective["damping_relative_to_mean_fisher_diagonal"]) * multiplier
         ),
+        pcg_dtype=objective["pcg_dtype"],
         pcg_max_iterations=int(objective["pcg_max_iterations"]),
         pcg_tolerance=float(objective["pcg_tolerance"]),
         microbatch_size=int(reward["microbatch_size"]),

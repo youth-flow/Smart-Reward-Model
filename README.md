@@ -39,13 +39,16 @@ method terminology is ProRM/ProRM+.
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
 | HPC4 GPU environment smoke | **Passed**, job `1640778`; image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f`; validated SIF SHA256 `d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb` |
-| Offline Hugging Face cache and config-specific inventories | **Passed** for the locked smoke/main configs, staging jobs `1641431`/`1641435` |
-| Pinned Qwen/Skywork controlled model smoke | **Passed**, job `1641441` on NVIDIA L20 (`00:03:15`); config `756270b0…47967`; source commit `c48db19` |
-| Five-seed main experiment | **Not yet run** |
+| Offline Hugging Face snapshots | Cached and offline-validated; replacement inventories for the current config hashes are pending |
+| Historical pre-fix controlled smoke | **Passed**, job `1641475` on NVIDIA L20 (`00:03:14`), but only under the superseded FP32-solver identity |
+| Superseded main attempt | Seed `20260722`, job `1641489`, failed the mandatory initial ProRM+ PCG gate: true relative residual `2.717e-5 > 1e-5` after 2048 iterations |
+| Current numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling; replacement staging/smoke/main pending |
+| Five-seed accepted main experiment | **No accepted seed or aggregate yet** |
 | “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
 
-The code and control plane have accepted controlled-smoke evidence. The repository does not yet contain
-the five-seed formal HPC4 main result.
+The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
+manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
+five-seed campaign.
 
 ## 1. From future policy utility to a reward-model loss
 
@@ -189,12 +192,18 @@ $$
 | `c in {1e-4,1e-3,1e-2}` | Preregistered damping sensitivity, not post-hoc tuning |
 
 PCG solves `(F_hat + lambda*I)v=m_hat` without forming a dense Fisher. Because this operator is a
-low-rank empirical Fisher plus isotropic damping, the controlled path deliberately uses
-unpreconditioned CG: coordinate-wise Jacobi scaling destroys the repeated damping eigenvalue. The
-relative-residual tolerance is `1e-5`; the `2048`-iteration cap is only a fail-closed ceiling and does
-not replace early convergence. The reported quadratic value and the detached envelope surrogate differ
-by a factor of two in value but yield the correct gradient; the derivation and tests are documented in
-[theory.md](docs/theory.md).
+low-rank empirical Fisher plus isotropic damping, the controlled path deliberately uses unpreconditioned
+CG: coordinate-wise Jacobi scaling destroys the repeated damping eigenvalue. Stored scores remain FP32,
+but moment construction, damping, Fisher matvecs, Krylov state, held-out geometry and rollout directions
+use the config-locked FP64 policy-geometry workspace. The reward head, autograd and AdamW remain FP32;
+FP64 envelope weights cross to FP32 exactly once at that boundary.
+
+Convergence is accepted only from an explicitly recomputed true residual `rhs-Ax` at relative tolerance
+`1e-5`. Periodic checks do not replace the recursive residual while retaining an incompatible Krylov
+direction; a false recursive crossing explicitly restarts from the true residual. The formal main ceiling
+is `8192` iterations, while smoke retains `2048`; both remain fail-closed ceilings, not forced iteration
+counts. The reported quadratic and detached envelope surrogate differ by a factor of two in value but
+yield the correct gradient; see [theory.md](docs/theory.md).
 
 ## 4. Controlled Phase 1 experiment
 
@@ -243,6 +252,10 @@ MultiPref prompts
 | Oracle | Pinned Skywork-Reward-V2-Qwen3-0.6B, FP32 |
 | Repeated labels | Canonical candidate `0-1`; geometric continuation `gamma=0.9`, hence `E[N]=10` |
 | Reward class | Frozen final-response-token feature plus bias-free linear head |
+| Model execution and storage | Qwen, Skywork, frozen features and stored score tensors in FP32 |
+| Fisher/GMM geometry | Moment, damping, Fisher matvec, PCG, held-out metrics and rollout direction in FP64 |
+| Reward optimization | FP32 head/gradient/AdamW; one explicit FP64-to-FP32 envelope-weight cast |
+| PCG gate | True relative residual `1e-5`; main cap `8192`, smoke cap `2048` |
 | Training | 720 fixed steps; identical optimization budget |
 | Evaluation | Held-out Fisher geometry plus measured sequence-KL `0.01 ± 5%` rollout |
 | Statistics | Five paired seeds; fixed main damping plus two sensitivity settings |
@@ -454,9 +467,9 @@ export PRORM_SMOKE_WALLTIME=REPLACE_WITH_APPROVED_PILOT_WALLTIME
 bash scripts/hpc4/submit_controlled.sh \
   configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
 
-# Fill these only from the accepted smoke measurements.
-export PRORM_ARRAY_CONCURRENCY=1
-export PRORM_MAIN_WALLTIME=12:00:00
+# Fill walltime only from the accepted replacement FP64 smoke/pilot.
+export PRORM_ARRAY_CONCURRENCY=2
+export PRORM_MAIN_WALLTIME=REPLACE_WITH_ACCEPTED_FP64_PILOT_WALLTIME
 # HPC4 l20_qos currently allows at most four submitted jobs per user.
 bash scripts/hpc4/submit_controlled.sh \
   configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 0-3
@@ -468,9 +481,8 @@ bash scripts/hpc4/submit_controlled.sh \
 The optional fourth argument is a zero-based configured seed index or one contiguous inclusive range.
 Omitting it submits all configured seeds. Splitting an array changes only Slurm scheduling: every task
 still resolves its seed from the same committed config and records its own numeric `SLURM_JOB_ID`.
-`PRORM_ARRAY_CONCURRENCY=1` caps each submitted array, not the whole split campaign; after index 4 is
-submitted, the documented campaign may use at most two concurrent GPUs, which is the `l20_qos`
-`MaxJobsPU=2` limit. Total GPU-hours do not increase.
+`PRORM_ARRAY_CONCURRENCY=2` fills the current `l20_qos MaxJobsPU=2` allowance. The QoS remains the global
+limit even after index 4 is submitted, so the campaign never runs more than two GPU tasks concurrently.
 
 After all five main seeds have been individually accepted, map every configured seed to exactly one
 successful controlled job and submit aggregation to a CPU partition. Replace each value below only with
@@ -520,7 +532,7 @@ commands.
 | Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
 | HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
-| Formal design identity | [configs/main.yaml](configs/main.yaml) |
+| Formal design identity | [configs/main.yaml](configs/main.yaml), [configs/identities.json](configs/identities.json) |
 
 ```text
 Smart-Reward-Model/             # retained repository name

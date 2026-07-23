@@ -398,6 +398,7 @@ def _validate_objective(value: object) -> None:
         required={
             "beta",
             "damping_relative_to_mean_fisher_diagonal",
+            "pcg_dtype",
             "pcg_tolerance",
             "pcg_max_iterations",
         },
@@ -416,6 +417,8 @@ def _validate_objective(value: object) -> None:
         minimum=0.0,
         minimum_inclusive=False,
     )
+    if objective["pcg_dtype"] != "float64":
+        raise ConfigError("objective.pcg_dtype must be 'float64'")
     _integer(objective["pcg_max_iterations"], "objective.pcg_max_iterations", minimum=1)
     if "damping_sensitivity_multipliers" in objective:
         multipliers = _sequence(
@@ -600,6 +603,12 @@ def validate_config(config: Mapping[str, object]) -> dict[str, Any]:
     if root["evaluation"]["rollout_candidates_per_prompt"] != root["data"]["num_candidates"]:
         raise ConfigError("evaluation.rollout_candidates_per_prompt must equal data.num_candidates")
     train_candidates = root["run"]["split_sizes"]["train"] * root["data"]["num_candidates"]
+    minimum_pcg_iterations = train_candidates + 1
+    if root["objective"]["pcg_max_iterations"] < minimum_pcg_iterations:
+        raise ConfigError(
+            "objective.pcg_max_iterations must be at least the number of train "
+            f"Fisher nodes plus one ({minimum_pcg_iterations})"
+        )
     if root["evaluation"]["kl_probe_candidates"] > train_candidates:
         raise ConfigError(
             "evaluation.kl_probe_candidates cannot exceed the number of train candidates"

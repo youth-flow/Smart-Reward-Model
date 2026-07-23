@@ -28,7 +28,11 @@ import torch
 from . import hf as _hf
 from .experiment import TrainingTensorData
 from .hf import ExactTokenCandidates, FixedALoRASetup
-from .linear import DampedEmpiricalFisher
+from .linear import (
+    DampedEmpiricalFisher,
+    FisherSolveDType,
+    resolve_fisher_solve_dtype,
+)
 from .metrics import policy_reward_moment
 from .pcg import pcg
 from .policy_update import (
@@ -185,6 +189,7 @@ def policy_direction_from_head(
     *,
     relative_damping: float,
     beta: float = 1.0,
+    pcg_dtype: FisherSolveDType = "float64",
     pcg_max_iterations: int = 200,
     pcg_tolerance: float = 1.0e-6,
     pcg_absolute_tolerance: float = 0.0,
@@ -206,6 +211,7 @@ def policy_direction_from_head(
         raise TypeError("train must be TrainingTensorData")
     relative = _finite_positive("relative_damping", relative_damping)
     beta_value = _finite_positive("beta", beta)
+    solve_dtype = resolve_fisher_solve_dtype(pcg_dtype)
     _positive_integer("pcg_max_iterations", pcg_max_iterations)
     _positive_integer("pcg_residual_recompute_interval", pcg_residual_recompute_interval)
     tolerance = _finite_nonnegative("pcg_tolerance", pcg_tolerance)
@@ -215,13 +221,15 @@ def policy_direction_from_head(
 
     weight = _coerce_head_weight(head_weight, train)
     predicted_rewards = train.reward_features @ weight
+    policy_scores = train.policy_scores.to(dtype=solve_dtype)
+    geometry_rewards = predicted_rewards.to(dtype=solve_dtype)
     moment = policy_reward_moment(
-        train.policy_scores,
-        predicted_rewards,
+        policy_scores,
+        geometry_rewards,
         center_candidates=True,
         candidate_dim=1,
     )
-    flat_scores = train.policy_scores.reshape(-1, train.policy_dimension)
+    flat_scores = policy_scores.reshape(-1, train.policy_dimension)
     undamped_fisher = DampedEmpiricalFisher(flat_scores, damping=0.0)
     mean_diagonal = float(undamped_fisher.diagonal().mean().item())
     if not math.isfinite(mean_diagonal) or mean_diagonal <= 0.0:

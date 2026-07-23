@@ -66,8 +66,8 @@ def pcg(
         max_iterations: Maximum number of Krylov iterations.
         tolerance: Relative residual tolerance.
         absolute_tolerance: Absolute residual tolerance.
-        residual_recompute_interval: Frequency for recomputing ``rhs-Ax`` to
-            limit recursive residual drift.
+        residual_recompute_interval: Frequency for verifying the recursive
+            residual against the true residual ``rhs-Ax``.
 
     Returns:
         :class:`PCGResult`.  Hitting ``max_iterations`` is reported rather
@@ -173,23 +173,40 @@ def pcg(
         residual.add_(matrix_direction, alpha=-float(alpha.item()))
 
         recursive_norm = float(torch.linalg.vector_norm(residual).item())
-        should_recompute = (
-            iteration % residual_recompute_interval == 0 or recursive_norm <= threshold
-        )
-        if should_recompute:
-            residual = rhs - checked_matvec(solution)
-        residual_norm = float(torch.linalg.vector_norm(residual).item())
-        if not math.isfinite(residual_norm):
+        if not math.isfinite(recursive_norm):
             raise PCGBreakdownError("PCG residual became non-finite")
-        if residual_norm <= threshold:
-            return PCGResult(
-                solution=solution,
-                converged=True,
-                iterations=iteration,
-                residual_norm=residual_norm,
-                relative_residual=residual_norm / rhs_norm,
-                reason="converged",
-            )
+        should_verify = iteration % residual_recompute_interval == 0 or recursive_norm <= threshold
+        if should_verify:
+            true_residual = rhs - checked_matvec(solution)
+            true_residual_norm = float(torch.linalg.vector_norm(true_residual).item())
+            if not math.isfinite(true_residual_norm):
+                raise PCGBreakdownError("PCG true residual became non-finite")
+            if true_residual_norm <= threshold:
+                return PCGResult(
+                    solution=solution,
+                    converged=True,
+                    iterations=iteration,
+                    residual_norm=true_residual_norm,
+                    relative_residual=true_residual_norm / rhs_norm,
+                    reason="converged",
+                )
+            if recursive_norm <= threshold:
+                # Recursive residuals can become over-optimistic in finite
+                # precision.  Replacing r while retaining the old Krylov
+                # direction destroys conjugacy, so a failed true-residual
+                # check must explicitly restart CG from the verified r.
+                residual = true_residual
+                preconditioned = (
+                    residual if inverse_diagonal is None else inverse_diagonal * residual
+                )
+                residual_preconditioned = torch.dot(residual, preconditioned)
+                rz_value = float(residual_preconditioned.item())
+                if not math.isfinite(rz_value) or rz_value <= 0.0:
+                    raise PCGBreakdownError(
+                        "non-positive preconditioned residual norm during restart"
+                    )
+                direction = preconditioned.clone()
+                continue
 
         preconditioned = residual if inverse_diagonal is None else inverse_diagonal * residual
         next_residual_preconditioned = torch.dot(residual, preconditioned)

@@ -129,6 +129,25 @@ def test_evaluation_seed_and_probe_count_match_runtime_domain(
         validate_config(too_many_probes)
 
 
+def test_pcg_cap_covers_the_empirical_fisher_rank_bound(
+    valid_config: dict[str, object],
+) -> None:
+    candidate = copy.deepcopy(valid_config)
+    train_nodes = candidate["run"]["split_sizes"]["train"] * candidate["data"]["num_candidates"]
+    candidate["objective"]["pcg_max_iterations"] = train_nodes
+
+    with pytest.raises(ConfigError, match="train Fisher nodes plus one"):
+        validate_config(candidate)
+
+
+def test_pcg_dtype_is_locked_to_float64(valid_config: dict[str, object]) -> None:
+    candidate = copy.deepcopy(valid_config)
+    candidate["objective"]["pcg_dtype"] = "float32"
+
+    with pytest.raises(ConfigError, match="pcg_dtype must be 'float64'"):
+        validate_config(candidate)
+
+
 def test_frozen_reward_backbone_must_equal_policy_revision(
     valid_config: dict[str, object],
 ) -> None:

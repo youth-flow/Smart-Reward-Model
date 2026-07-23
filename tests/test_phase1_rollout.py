@@ -524,6 +524,17 @@ def test_fake_loader_end_to_end_writes_no_raw_oracle(
         "_load_oracle_runtime",
         lambda *a, **k: stage._OracleRuntime(oracle_tokenizer, _TinyOracle().eval()),
     )
+    original_match = stage.match_fixed_a_measured_kl
+    matched_geometry_dtypes: list[tuple[torch.dtype, torch.dtype]] = []
+
+    def checked_match(*args, **kwargs):
+        direction = args[3]
+        train_node_scores = kwargs["train_node_scores"]
+        matched_geometry_dtypes.append((direction.dtype, train_node_scores.dtype))
+        assert direction.device == train_node_scores.device
+        return original_match(*args, **kwargs)
+
+    monkeypatch.setattr(stage, "match_fixed_a_measured_kl", checked_match)
 
     output = tmp_path / "matched.json"
     payload = stage.evaluate_matched_kl_rollouts(
@@ -557,6 +568,10 @@ def test_fake_loader_end_to_end_writes_no_raw_oracle(
     assert (
         payload["updated_rollouts_sha256"] == hashlib.sha256(rollout_path.read_bytes()).hexdigest()
     )
+    assert matched_geometry_dtypes == [
+        (torch.float64, torch.float64),
+        (torch.float64, torch.float64),
+    ]
     assert torch.count_nonzero(policy.lora_B).item() == 0
     with pytest.raises(FileExistsError, match="refusing to overwrite"):
         stage.evaluate_matched_kl_rollouts(

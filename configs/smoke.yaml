@@ -45,6 +45,7 @@ annotations:
 objective:
   beta: 1.0
   damping_relative_to_mean_fisher_diagonal: 0.001
+  pcg_dtype: float64
   pcg_tolerance: 1.0e-5
   pcg_max_iterations: 2048
 

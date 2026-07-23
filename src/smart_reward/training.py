@@ -30,7 +30,11 @@ from .contracts import (
     LEGACY_SRM_PLUS,
     PRORM_PLUS,
 )
-from .linear import DampedEmpiricalFisher
+from .linear import (
+    DampedEmpiricalFisher,
+    FisherSolveDType,
+    resolve_fisher_solve_dtype,
+)
 from .objective import (
     dual_loss,
     dual_saddle_value,
@@ -353,6 +357,7 @@ class ProRMPlusTrainingConfig:
     max_grad_norm: float | None = None
     beta: float = 1.0
     damping: float = 1.0e-3
+    pcg_dtype: FisherSolveDType = "float64"
     pcg_max_iterations: int = 200
     pcg_tolerance: float = 1.0e-5
     pcg_absolute_tolerance: float = 0.0
@@ -364,6 +369,7 @@ class ProRMPlusTrainingConfig:
         _finite_scalar("weight_decay", self.weight_decay)
         _finite_scalar("beta", self.beta, positive=True)
         _finite_scalar("damping", self.damping)
+        resolve_fisher_solve_dtype(self.pcg_dtype)
         _finite_scalar("pcg_tolerance", self.pcg_tolerance)
         _finite_scalar("pcg_absolute_tolerance", self.pcg_absolute_tolerance)
         _nonnegative_integer("pcg_max_iterations", self.pcg_max_iterations)
@@ -438,6 +444,39 @@ class ProRMPlusEvaluation:
     pcg_residual_norm: float
     pcg_relative_residual: float
     pcg_converged: bool
+
+
+@dataclass(frozen=True)
+class _ProRMPolicyGeometry:
+    """Cached FP64 tensors for the Fisher/GMM inner problem.
+
+    Reward features and the trainable head remain in their configured dtype.
+    Only the fixed policy tangent geometry is promoted, which prevents an
+    FP32 residual floor without turning the outer optimizer into FP64.
+    """
+
+    edge_scores: torch.Tensor
+    node_scores: torch.Tensor
+    h: torch.Tensor
+    operator: DampedEmpiricalFisher
+
+    @classmethod
+    def from_batch(
+        cls,
+        batch: FeatureTrainingBatch,
+        damping: float,
+        pcg_dtype: FisherSolveDType,
+    ) -> _ProRMPolicyGeometry:
+        solve_dtype = resolve_fisher_solve_dtype(pcg_dtype)
+        edge_scores = batch.edge_scores.to(dtype=solve_dtype)
+        node_scores = batch.node_scores.to(dtype=solve_dtype)
+        h = batch.h.to(dtype=solve_dtype)
+        return cls(
+            edge_scores=edge_scores,
+            node_scores=node_scores,
+            h=h,
+            operator=DampedEmpiricalFisher(node_scores, damping),
+        )
 
 
 def _validate_model_batch(
@@ -543,9 +582,22 @@ def _solve_prorm_dual(
     margins: torch.Tensor,
     config: ProRMPlusTrainingConfig,
     warm_start: torch.Tensor | None,
+    geometry: _ProRMPolicyGeometry | None = None,
 ) -> tuple[torch.Tensor, DampedEmpiricalFisher, PCGResult]:
-    moment = empirical_moment(batch.edge_scores, margins, batch.h)
-    operator = DampedEmpiricalFisher(batch.node_scores, config.damping)
+    workspace = (
+        _ProRMPolicyGeometry.from_batch(batch, config.damping, config.pcg_dtype)
+        if geometry is None
+        else geometry
+    )
+    moment = empirical_moment(
+        workspace.edge_scores,
+        margins.to(dtype=workspace.edge_scores.dtype),
+        workspace.h,
+    )
+    operator = workspace.operator
+    promoted_warm_start = (
+        None if warm_start is None else warm_start.to(device=moment.device, dtype=moment.dtype)
+    )
     result = pcg(
         operator.matvec,
         moment,
@@ -554,7 +606,7 @@ def _solve_prorm_dual(
         # markedly worse for this geometry; unpreconditioned CG preserves the
         # rank(S)+1 Krylov structure.
         inverse_diagonal=None,
-        x0=warm_start,
+        x0=promoted_warm_start,
         max_iterations=config.pcg_max_iterations,
         tolerance=config.pcg_tolerance,
         absolute_tolerance=config.pcg_absolute_tolerance,
@@ -603,11 +655,10 @@ def evaluate_prorm_plus(
             raise TypeError("warm_start must be a torch.Tensor")
         if warm_start.shape != (batch.policy_dimension,):
             raise ValueError("warm_start has the wrong policy dimension")
-        if (
-            warm_start.dtype != batch.edge_scores.dtype
-            or warm_start.device != batch.edge_scores.device
-        ):
-            raise ValueError("warm_start must match the batch dtype and device")
+        if not warm_start.is_floating_point():
+            raise TypeError("warm_start must have a floating-point dtype")
+        if warm_start.device != batch.edge_scores.device:
+            raise ValueError("warm_start must match the batch device")
         if not bool(torch.isfinite(warm_start).all()):
             raise ValueError("warm_start must be finite")
     margins = _full_margins(model, batch, effective_config.microbatch_size)
@@ -758,6 +809,11 @@ class ProRMPlusTrainer:
         self.model = model
         self.batch = batch
         self.config = effective_config
+        self._policy_geometry = _ProRMPolicyGeometry.from_batch(
+            batch,
+            effective_config.damping,
+            effective_config.pcg_dtype,
+        )
         self.optimizer = optimizer or _make_optimizer(
             model,
             name=effective_config.optimizer,
@@ -780,6 +836,7 @@ class ProRMPlusTrainer:
             margins,
             self.config,
             self.dual_direction,
+            self._policy_geometry,
         )
         direction = result.solution.detach().clone()
         self.dual_direction = direction
@@ -798,12 +855,16 @@ class ProRMPlusTrainer:
                 self.batch.left_features[index],
                 self.batch.right_features[index],
             )
-            weights = envelope_weights(
-                self.batch.edge_scores[index],
+            policy_weights = envelope_weights(
+                self._policy_geometry.edge_scores[index],
                 direction,
                 beta=self.config.beta,
                 detach_direction=True,
             )
+            # This is the only precision boundary in the ProRM envelope
+            # gradient: the accurately solved scalar edge weights are cast to
+            # the reward-head dtype used by autograd and AdamW.
+            weights = policy_weights.to(dtype=chunk_margins.dtype)
             chunk_surrogate = envelope_surrogate(
                 chunk_margins,
                 self.batch.h[index],
@@ -844,11 +905,35 @@ class ProRMPlusTrainer:
         """Evaluate current full-data ProRM+ loss without changing trainer state."""
 
         warm_start = self.dual_direction if use_warm_start else None
-        return evaluate_prorm_plus(
+        margins = _full_margins(
             self.model,
             self.batch,
+            self.config.microbatch_size,
+        )
+        moment, operator, result = _solve_prorm_dual(
+            self.batch,
+            margins,
             self.config,
-            warm_start=warm_start,
+            warm_start,
+            self._policy_geometry,
+        )
+        direction = result.solution.detach()
+        loss = dual_loss(moment, direction, beta=self.config.beta)
+        saddle = dual_saddle_value(
+            moment,
+            direction,
+            operator.matvec(direction),
+            beta=self.config.beta,
+        )
+        return ProRMPlusEvaluation(
+            moment=moment.detach().clone(),
+            direction=direction.clone(),
+            dual_loss=float(loss.item()),
+            dual_saddle_value=float(saddle.item()),
+            pcg_iterations=result.iterations,
+            pcg_residual_norm=result.residual_norm,
+            pcg_relative_residual=result.relative_residual,
+            pcg_converged=result.converged,
         )
 
     def state_dict(self) -> dict[str, Any]:
@@ -895,10 +980,10 @@ class ProRMPlusTrainer:
             if direction.shape != (self.batch.policy_dimension,):
                 raise ValueError("dual_direction has the wrong shape")
             if (
-                direction.dtype != self.batch.edge_scores.dtype
-                or direction.device != self.batch.edge_scores.device
+                direction.dtype != self._policy_geometry.edge_scores.dtype
+                or direction.device != self._policy_geometry.edge_scores.device
             ):
-                raise ValueError("dual_direction has the wrong dtype or device")
+                raise ValueError("dual_direction has the wrong solver dtype or device")
             if not bool(torch.isfinite(direction).all()):
                 raise ValueError("dual_direction must be finite")
             restored_direction = direction.detach().clone()

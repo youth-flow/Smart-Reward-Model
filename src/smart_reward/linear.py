@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal
 
 import torch
+
+FisherSolveDType = Literal["float64"]
+
+
+def resolve_fisher_solve_dtype(value: str) -> torch.dtype:
+    """Resolve the locked high-accuracy Fisher solve dtype."""
+
+    if value != "float64":
+        raise ValueError("pcg_dtype must be 'float64'")
+    return torch.float64
 
 
 def _validate_score_matrix(score_matrix: torch.Tensor) -> tuple[int, int]:
@@ -124,8 +134,10 @@ class DampedEmpiricalFisher:
 
 __all__ = [
     "DampedEmpiricalFisher",
+    "FisherSolveDType",
     "damped_fisher_diagonal",
     "damped_fisher_matvec",
     "fisher_diagonal",
     "fisher_matvec",
+    "resolve_fisher_solve_dtype",
 ]
