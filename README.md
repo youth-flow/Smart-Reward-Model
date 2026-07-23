@@ -209,6 +209,11 @@ are not training targets. Qwen generates the four candidate responses. For canon
 Bernoulli repeats and the randomized estimator `h`. Thus the Phase-1 “annotator” is a reproducible
 Skywork-defined BTL simulator, not a new human-labeling round.
 
+Formal offline jobs resolve the pinned MultiPref snapshot locally and load its sorted
+`data/train-*.parquet` shards through the Parquet builder. They do not call
+`load_dataset("allenai/multipref", ...)`: Datasets 3.6 may still query Hub metadata on that path even
+with offline flags set.
+
 ```text
 MultiPref prompts
     -> pi_0: four exact-token candidates per prompt
@@ -226,7 +231,7 @@ MultiPref prompts
 
 | Component | Locked design |
 |---|---|
-| Prompts | MultiPref pinned revision; `1536/256/256` prompt-level split |
+| Prompts | MultiPref pinned revision; local `data/train-*.parquet`; `1536/256/256` prompt-level split |
 | Reference policy | Pinned Qwen2.5-0.5B-Instruct, FP32 |
 | Candidates | Four independent base-distribution samples per prompt; no filtering or deduplication |
 | Policy tangent | Last four `q_proj/v_proj` modules, rank-4 fixed-A LoRA-B |
@@ -349,9 +354,10 @@ PyTorch 2.7.1/CUDA 12.6 definition in
 
 HPC4 cannot build the definition locally because its Apptainer installation has no SUID builder or
 subuid/subgid mapping, and user namespaces are disabled on the login node. The login node is therefore
-limited to Git, file checks and Slurm submission; it must not run `apptainer exec` for HF staging. The
-dedicated GitHub workflow builds the raw SIF, records build evidence and publishes it through public
-GHCR ORAS. Pull the validated artifact by its immutable **image-build commit**, not by the current source
+limited to Git, file checks and Slurm submission; it must not run `apptainer exec` for HF staging or
+aggregation. The dedicated GitHub workflow builds the raw SIF, records build evidence and publishes it
+through public GHCR ORAS. Pull the validated artifact by its immutable **image-build commit**, not by the
+current source
 `HEAD`; the source checkout may legitimately contain later staging/control-plane changes. The fetcher
 resolves and verifies the OCI manifest digest and requires the local SIF SHA256 to equal the manifest's
 SIF-layer digest:
@@ -423,7 +429,9 @@ sha256sum "${cache_root}"/inventories/*.json
 an approved lower value.
 
 Staging downloads only the public pinned snapshots. Its offline proof resolves snapshot revisions,
-configs, tokenizers and the MultiPref dataset; it does not claim to have instantiated model weights.
+configs and tokenizers, then reads MultiPref directly from the pinned snapshot's sorted
+`data/train-*.parquet` shards. This avoids the Datasets 3.6 Hub-metadata path; it does not claim to have
+instantiated model weights.
 Actual Qwen/Skywork weight loading is tested by the controlled model smoke. Each config-specific inventory
 digest is reverified offline and bound into the run manifest, artifact producer identity and final
 aggregate.
@@ -448,13 +456,45 @@ bash scripts/hpc4/submit_controlled.sh \
   configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
 ```
 
+After all five main seeds have been individually accepted, map every configured seed to exactly one
+successful controlled job and submit aggregation to a CPU partition. Replace each value below only with
+the corresponding `COMPLETED`, `ExitCode=0:0` job ID whose run directory contains a valid `SUCCESS`
+marker:
+
+```bash
+job_20260722=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260723=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260724=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260725=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260726=REPLACE_WITH_ACCEPTED_JOB_ID
+
+aggregate_job="$(
+  bash scripts/hpc4/submit_aggregate.sh \
+    configs/main.yaml amd 01:00:00 \
+    "20260722=${job_20260722}" \
+    "20260723=${job_20260723}" \
+    "20260724=${job_20260724}" \
+    "20260725=${job_20260725}" \
+    "20260726=${job_20260726}"
+)"
+aggregate_job="${aggregate_job%%;*}"
+test -n "${aggregate_job}"
+squeue -j "${aggregate_job}"
+```
+
+Aggregation is never run by direct login-node `apptainer exec`. The CPU job publishes the no-overwrite,
+atomic result at
+`$PRORM_PROJECT_ROOT/runs/controlled-main/<main-config-hash>/aggregate/`. Its `SUCCESS` marker means the
+aggregation pipeline and evidence validation completed; it does **not** mean the scientific criterion
+passed. The conclusion is exclusively `pre_registered_evidence.status` in `aggregate.json`, mirrored as
+`pre_registered_evidence_status=passed` or `not_passed` in `SUCCESS`.
+
 Formal jobs never use `--allow-download`. They bind the submission Git commit and config-specific cache
 inventory before allocation work begins. The run manifest records that **source Git SHA** separately from
 the validated **SIF SHA256**; it does not require the source commit to equal image-build commit
 `b057bc9e134f1844248d655ed0f6c340af03099f`. Wall time, GPU-hours and storage budgets come from the
-accepted smoke record. The five-seed aggregate must be produced inside the same image under
-`$PRORM_PROJECT_ROOT/runs`, not in the Git checkout. See [hpc4.md](docs/hpc4.md) for the exact validation,
-aggregation and scratch-retention commands.
+accepted smoke record. See [hpc4.md](docs/hpc4.md) for exact aggregation acceptance and scratch-retention
+commands.
 
 ## 8. Documentation and code map
 

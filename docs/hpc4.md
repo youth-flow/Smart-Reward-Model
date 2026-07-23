@@ -20,7 +20,7 @@
 | 4. HF staging | 在 CPU 计算节点严格串行执行 smoke stage、验收、main stage | 两个 stage job 成功并产生 config-specific inventory | 不提交 controlled job |
 | 5. Model smoke | `submit_controlled.sh configs/smoke.yaml ...` | artifact、BT-MLE/ProRM+、KL、rollout、memory evidence 完整 | 定位实现或容量问题 |
 | 6. Main | 同一环境提交 `configs/main.yaml` | 五个 paired seeds 主链完整 | 保留失败证据后诊断 |
-| 7. Aggregate | `aggregate-results` | 身份一致并写出预注册判据 | 不手改结果 |
+| 7. Aggregate | CPU 节点运行 `submit_aggregate.sh` | 身份一致、原子发布并写出预注册判据 | 不手改结果 |
 
 这些 gate 必须顺序执行。后一个 gate 成功不能补偿前一个 gate 的失败；尤其不能在登录节点
 直接运行模型命令，也不能因为单个 smoke 成功就宣称实验结论成立。
@@ -82,7 +82,7 @@ $PRORM_PROJECT_ROOT/
 │                                    # candidates, repeated labels, S/features/oracle
 └── runs/<run-name>/<config-sha>/
     ├── seed-N/job-J/               # manifest/comparison/rollout + artifact symlink
-    └── aggregate/aggregate.json    # accepted five-seed aggregate
+    └── aggregate/                  # SUCCESS + aggregate/manifest/hash evidence
 ```
 
 Qwen 和 Skywork base weights 只保存在 `hf-cache/hub`。训练得到的 bias-free linear RM head
@@ -224,6 +224,13 @@ printf '%s  %s\n' \
 - `allenai/multipref` dataset revision；
 - Qwen policy/reward-feature model 与 tokenizer revision；
 - Skywork oracle model 与 tokenizer revision。
+
+formal MultiPref 路径先用 `huggingface_hub` 在本地 cache 精确解析 pinned snapshot，再按文件名
+排序并直接读取其中的 `data/train-*.parquet` shards，调用的是本地 Parquet builder，而不是
+`load_dataset("allenai/multipref", ...)`。这是硬性离线约束：Datasets 3.6 即使收到 offline
+flags，repo-ID loader 仍可能发起 Hub metadata 查询。staging 的 offline-resolution evidence
+与 controlled materialization 都走同一 parquet 路径；缺 shard、revision 不符或任何网络
+依赖都会硬失败。
 
 首次 staging 必须对 smoke 与 main 两份 config 分别执行。两者当前引用相同 repo revision
 并共用同一个 cache，但各自的 config hash 与 inventory identity 不可互相替代。登录节点
@@ -539,96 +546,113 @@ mismatch 或 dirty/错误 commit 失败，都会使该 seed 的主链无效。se
 
 Slurm array 不自动做跨 seed 聚合。先逐一用上一节的 `sacct`、log、manifest 和 symlink 条件
 验收。每个 seed 必须**显式选择一个** exit-code-0 的 `job-J`；不要用 `latest`、`find | head`
-或通配符偷偷选择重复/失败 run。下面五个 job ID 必须由验收记录填写：
+或通配符偷偷选择重复/失败 run。登录节点不得直接执行 `apptainer exec` 或 host
+`aggregate-results`；它只调用 `submit_aggregate.sh`，真正的验证与聚合在 `amd` 或 `intel`
+CPU Slurm job 内使用 validated SIF 和 submitted commit 完成。
+
+先把五个预注册 seed 与各自**唯一一个已验收成功**的 controlled job 写成明确映射。每个所选
+job 必须是 Slurm `COMPLETED`、`ExitCode=0:0`，且对应
+`runs/.../seed-<seed>/job-<job-id>/SUCCESS` schema 与 job ID 均正确、`FAILED` 不存在。下列五
+个值必须来自逐 seed 验收记录，不得复用同一个 job ID：
+
+| Seed | Accepted controlled job |
+|---:|---:|
+| `20260722` | `REPLACE_WITH_ACCEPTED_JOB_ID` |
+| `20260723` | `REPLACE_WITH_ACCEPTED_JOB_ID` |
+| `20260724` | `REPLACE_WITH_ACCEPTED_JOB_ID` |
+| `20260725` | `REPLACE_WITH_ACCEPTED_JOB_ID` |
+| `20260726` | `REPLACE_WITH_ACCEPTED_JOB_ID` |
+
+提交一个单节点、单 task、1 CPU、8 GiB、无 GPU 的 formal aggregation job：
 
 ```bash
 set -euo pipefail
-repo_root="$(pwd -P)"
-image_path="${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}"
-printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${image_path}" \
-  | sha256sum --check
+job_20260722=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260723=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260724=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260725=REPLACE_WITH_ACCEPTED_JOB_ID
+job_20260726=REPLACE_WITH_ACCEPTED_JOB_ID
 
-main_hash="$(
-  apptainer exec --cleanenv \
-    --bind "${repo_root}:${repo_root}" \
-    --env "PYTHONPATH=${repo_root}/src" \
-    "${image_path}" \
-    python - "${repo_root}/configs/main.yaml" <<'PY'
-import sys
-from smart_reward.config import config_hash, load_config
-print(config_hash(load_config(sys.argv[1])))
-PY
+aggregate_job="$(
+  bash scripts/hpc4/submit_aggregate.sh \
+    configs/main.yaml amd 01:00:00 \
+    "20260722=${job_20260722}" \
+    "20260723=${job_20260723}" \
+    "20260724=${job_20260724}" \
+    "20260725=${job_20260725}" \
+    "20260726=${job_20260726}"
 )"
-campaign_root="${PRORM_PROJECT_ROOT}/runs/controlled-main/${main_hash}"
-aggregate_dir="${campaign_root}/aggregate"
-mkdir -p "${aggregate_dir}"
-test ! -e "${aggregate_dir}/aggregate.json"
-test ! -e "${aggregate_dir}/aggregate.json.sha256"
-
-comparisons=(
-  "${campaign_root}/seed-20260722/job-REPLACE_20260722/comparison.json"
-  "${campaign_root}/seed-20260723/job-REPLACE_20260723/comparison.json"
-  "${campaign_root}/seed-20260724/job-REPLACE_20260724/comparison.json"
-  "${campaign_root}/seed-20260725/job-REPLACE_20260725/comparison.json"
-  "${campaign_root}/seed-20260726/job-REPLACE_20260726/comparison.json"
-)
-rollouts=(
-  "${campaign_root}/seed-20260722/job-REPLACE_20260722/rollout.json"
-  "${campaign_root}/seed-20260723/job-REPLACE_20260723/rollout.json"
-  "${campaign_root}/seed-20260724/job-REPLACE_20260724/rollout.json"
-  "${campaign_root}/seed-20260725/job-REPLACE_20260725/rollout.json"
-  "${campaign_root}/seed-20260726/job-REPLACE_20260726/rollout.json"
-)
-for path in "${comparisons[@]}" "${rollouts[@]}"; do
-  test -f "${path}"
-done
-for comparison in "${comparisons[@]}"; do
-  run_dir="$(dirname "${comparison}")"
-  test -f "${run_dir}/SUCCESS"
-  test ! -e "${run_dir}/FAILED"
-  test -e "${run_dir}/artifact/metadata.json"
-done
-
-# Use the validated image and submitted source, never an unpinned host prorm install.
-apptainer exec --cleanenv \
-  --bind "${repo_root}:${repo_root},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}" \
-  --env "PYTHONPATH=${repo_root}/src" \
-  "${image_path}" \
-  python -m smart_reward.cli aggregate-results \
-  "${repo_root}/configs/main.yaml" "${aggregate_dir}/aggregate.json" \
-  "${comparisons[@]}" \
-  --repo-root "${repo_root}" \
-  --rollouts "${rollouts[@]}"
-aggregate_sha_tmp="$(
-  mktemp "${aggregate_dir}/.aggregate.json.sha256.XXXXXX"
-)"
-trap 'rm -f -- "${aggregate_sha_tmp}"' EXIT
-(
-  cd "${aggregate_dir}"
-  sha256sum aggregate.json
-) > "${aggregate_sha_tmp}"
-ln "${aggregate_sha_tmp}" "${aggregate_dir}/aggregate.json.sha256"
-rm -f -- "${aggregate_sha_tmp}"
-aggregate_sha_tmp=""
-trap - EXIT
+aggregate_job="${aggregate_job%%;*}"
+test -n "${aggregate_job}"
+squeue -j "${aggregate_job}"
 ```
 
-聚合器会拒绝缺 seed、重复 seed、额外 seed 或非 main damping identity，并验证每个 rollout
-绑定的 config/artifact/comparison/JSONL hashes。它还重新读取每个 comparison 同目录的
-`run-manifest.json`，校验 manifest SHA 与 selected seed，并硬要求五 seed 的 Git commit、
-image SHA256、HF inventory SHA256、Slurm account/partition、GPU model 完全相同；同时要求
-aggregation checkout clean 且 `HEAD` 精确等于该 producer commit，并把相对 config path 写入
-`aggregation_source`。共享 identity 写入 aggregate。随后在同一 aggregate 中加入 prompt-level
-`test_rollout_improvement`，并自动
-聚合所有声明 damping 的 local-regret evidence、记录 PCG failure/non-reversal、执行预注册
-criteria。正式主结论只能读取
-`pre_registered_evidence.status` 与逐项 criteria；不得查看 sensitivity 后换主阻尼。该状态
-不是 p-value 或“显著”标签。aggregate 与对应 SHA 文件均采用 no-overwrite 发布；若目标
-已存在，必须把它作为既有证据审计，不能静默重算或覆盖。
+接口为：
 
-最终结果目录必须连同五个 manifest、comparison、rollout、updated JSONL、aggregate、
-artifact symlink、Slurm log、image/build/staging/smoke reports 与两份 HF inventory 一起长期
-保存。
+```text
+submit_aggregate.sh <main-config.yaml> <amd|intel> <walltime> <seed=controlled_job_id>...
+```
+
+submit 层要求 clean/tracked submitted commit、validated image、main config-specific inventory，
+并用 committed `configs/identities.json` 约束 config hash 和 seed 数。compute 层建立 detached
+exact-commit source，要求输入映射与 `configs/main.yaml` 的五个 seeds 精确相等且 job ID
+互不重复；随后复核每个 `SUCCESS` marker、manifest、artifact symlink、
+comparison/rollout/updated-JSONL hashes 以及共同 Git/image/inventory/account/partition/GPU
+identity。任一输入失败时不发布 final aggregate。
+
+aggregation job 离开队列后先验收 Slurm 状态和 log：
+
+```bash
+sacct -j "${aggregate_job}" \
+  --format=JobID,State,Elapsed,ExitCode,Partition,MaxRSS
+tail -n 40 \
+  "${PRORM_PROJECT_ROOT}/slurm-logs/prorm-aggregate-${aggregate_job}.out"
+```
+
+只有 `COMPLETED` 与 `ExitCode=0:0` 才会把 staging directory 原子、no-overwrite 发布为：
+
+```text
+$PRORM_PROJECT_ROOT/runs/controlled-main/<main-config-hash>/aggregate/
+├── SUCCESS
+├── aggregate.json
+├── aggregate.json.sha256
+└── aggregation-manifest.json
+```
+
+当前 locked `configs/main.yaml` 在 committed `configs/identities.json` 中的 semantic hash 为
+`aa2a6a075ee52423e7660e14f87efcf89525a9fe5cf2f5bac991477cfeca2481`。执行最终文件验收：
+
+```bash
+main_config_hash=aa2a6a075ee52423e7660e14f87efcf89525a9fe5cf2f5bac991477cfeca2481
+aggregate_dir="${PRORM_PROJECT_ROOT}/runs/controlled-main/${main_config_hash}/aggregate"
+test -d "${aggregate_dir}"
+test -f "${aggregate_dir}/SUCCESS"
+test -f "${aggregate_dir}/aggregation-manifest.json"
+(
+  cd "${aggregate_dir}"
+  sha256sum --check aggregate.json.sha256
+)
+grep -Fx 'status=SUCCESS' "${aggregate_dir}/SUCCESS"
+grep -E '^pre_registered_evidence_status=(passed|not_passed)$' \
+  "${aggregate_dir}/SUCCESS"
+```
+
+这里必须区分两层状态：
+
+- `SUCCESS` 中的 `status=SUCCESS` 只表示 CPU aggregation job 完整验证五个来源、成功运行聚合器
+  并原子发布证据。
+- 科研结论只由 `aggregate.json` 的 `pre_registered_evidence.status` 决定，并在 `SUCCESS`
+  中镜像为 `pre_registered_evidence_status=passed` 或 `not_passed`。只有 `passed` 支持预注册
+  主张；`not_passed` 是有效、应保留的否定结果，不是工程失败，也不得因此换 seed、阻尼或重跑。
+
+聚合器会拒绝缺 seed、重复/额外 seed 或非 main damping identity；在同一 aggregate 中加入
+prompt-level `test_rollout_improvement`，聚合所有声明 damping 的 local-regret evidence、记录
+PCG failure/non-reversal 并执行预注册 criteria。该状态不是 p-value 或“显著”标签。若 final
+`aggregate/` 已存在，提交会拒绝覆盖，必须把它作为既有证据审计。
+
+最终目录必须连同五个 manifest、comparison、rollout、updated JSONL、artifact symlink、
+controlled/aggregation Slurm logs、image/build/staging/smoke reports 与两份 HF inventory 一起
+长期保存。
 
 ### 9.1 Scratch 清理
 
