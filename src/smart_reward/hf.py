@@ -441,6 +441,19 @@ def generate_exact_candidates(
         generate_inputs["attention_mask"] = prompt_attention_mask
     with torch.inference_mode():
         generated = model.generate(**generate_inputs)
+    generated_sequences = (
+        generated if isinstance(generated, torch.Tensor) else getattr(generated, "sequences", None)
+    )
+    if not isinstance(generated_sequences, torch.Tensor):
+        raise TypeError("model.generate must return a tensor or expose a sequences tensor")
+    # Transformers creates the sampled token IDs inside inference_mode.  Such
+    # tensors cannot later be saved by autograd operations (for example,
+    # gather in exact log-probability scoring).  A clone made after leaving
+    # inference_mode keeps every sampled ID unchanged while converting the
+    # immutable generation result into a normal tensor that can safely index
+    # a differentiable policy forward pass.
+    if generated_sequences.is_inference():
+        generated_sequences = generated_sequences.clone()
 
     eos_token_id = canonical.get("eos_token_id")
     if eos_token_id is None:
@@ -455,7 +468,7 @@ def generate_exact_candidates(
 
     candidates = build_exact_token_candidates(
         prompt_input_ids,
-        generated,
+        generated_sequences,
         eos_token_id=eos_token_id,
         prompt_attention_mask=prompt_attention_mask,
         pad_token_id=pad_token_id,

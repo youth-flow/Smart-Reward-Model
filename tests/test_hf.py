@@ -145,6 +145,39 @@ def test_generation_and_scoring_reuse_exact_ids_and_same_policy_instance() -> No
         score_exact_candidates(model, candidates)
 
 
+class _InferenceTensorPolicy(_FakePolicy):
+    def generate(self, **kwargs: object) -> torch.Tensor:
+        self.generate_kwargs = dict(kwargs)
+        # generate_exact_candidates invokes this method under inference_mode,
+        # matching the tensor provenance of Transformers.generate.
+        return self.generated.clone()
+
+
+def test_generated_inference_ids_are_safe_for_differentiable_exact_scoring() -> None:
+    prompt_ids = torch.tensor([[4, 5]])
+    generated = torch.tensor(
+        [
+            [4, 5, 7, 9],
+            [4, 5, 8, 9],
+        ]
+    )
+    model = _InferenceTensorPolicy(generated).eval()
+
+    candidates = generate_exact_candidates(
+        model,
+        prompt_ids,
+        prompt_attention_mask=torch.ones_like(prompt_ids),
+        generation_kwargs={"max_new_tokens": 2, "num_return_sequences": 2},
+    )
+
+    assert not candidates.input_ids.is_inference()
+    assert torch.equal(candidates.input_ids, generated)
+    log_probabilities = score_exact_candidates(model, candidates)
+    log_probabilities.sum().backward()
+    assert model.scale_lora_B.grad is not None
+    assert torch.isfinite(model.scale_lora_B.grad)
+
+
 def test_exact_candidate_builder_includes_eos_and_handles_left_padding() -> None:
     prompt_ids = torch.tensor([[0, 0, 3, 4], [0, 6, 7, 8]])
     prompt_mask = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]])

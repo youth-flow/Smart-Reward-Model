@@ -609,7 +609,9 @@ tail -n 40 \
   "${PRORM_PROJECT_ROOT}/slurm-logs/prorm-aggregate-${aggregate_job}.out"
 ```
 
-只有 `COMPLETED` 与 `ExitCode=0:0` 才会把 staging directory 原子、no-overwrite 发布为：
+aggregation job 只有同时满足 Slurm `COMPLETED`、`ExitCode=0:0`，且下列 final
+directory/文件校验全部通过，才可被接受。成功路径会把 staging directory 原子、
+no-overwrite 发布为：
 
 ```text
 $PRORM_PROJECT_ROOT/runs/controlled-main/<main-config-hash>/aggregate/
