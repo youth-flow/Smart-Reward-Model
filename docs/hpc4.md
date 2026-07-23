@@ -572,9 +572,10 @@ tail -n 200 \
 - comparison 的 manifest SHA/environment identity 与同目录 `run-manifest.json` 完全一致；
 - artifact identity/integrity 检查通过；
 - run-local `artifact` relative symlink 可解析到 content-addressed project artifact；
-- config 明确记录 `pcg_dtype=float64`；训练、held-out 与 rollout-direction solve 的 reason
-  均为 `converged|zero_rhs`，显式 true relative residual `<=1e-5`，iteration ceiling 不能被
-  误当成成功；
+- config 明确记录 `pcg_dtype=float64`；训练、held-out 与 rollout-direction solve 运行时均
+  fail closed。对 schema 已序列化的 final/rollout evidence 检查 `converged`、显式 true
+  relative residual `<=1e-5`，以及存在时的 reason `converged|zero_rhs`；iteration ceiling
+  不能被误当成成功；
 - 主阻尼 comparison 存在且 PCG converged；每档 sensitivity 要么有完整结果，要么有显式
   failure record，任何 sensitivity seed 都不能被静默删除；
 - BT-MLE/ProRM+ measured KL 各自在 `0.01 ± 5%`，rollout 文件完整；
