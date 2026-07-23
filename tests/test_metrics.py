@@ -1,5 +1,6 @@
 import torch
 
+import smart_reward.metrics as metrics_module
 from smart_reward.metrics import (
     gauge_center,
     local_regret,
@@ -7,6 +8,22 @@ from smart_reward.metrics import (
     natural_direction_metrics,
     policy_reward_moment,
 )
+
+
+def test_default_score_fisher_solve_is_unpreconditioned(monkeypatch) -> None:
+    original_pcg = metrics_module.pcg
+    observed_preconditioners: list[torch.Tensor | None] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_preconditioners.append(kwargs.get("inverse_diagonal"))
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "pcg", recording_pcg)
+    scores = torch.tensor([[[1.0, 0.0], [-1.0, 1.0], [0.5, -0.5]]], dtype=torch.float64)
+    rewards = torch.tensor([[1.0, -0.5, 0.25]], dtype=torch.float64)
+    natural_direction(scores, rewards, damping=0.2)
+
+    assert observed_preconditioners == [None]
 
 
 def test_gauge_centering_removes_per_prompt_constants() -> None:

@@ -9,6 +9,7 @@ import torch
 from torch import nn
 
 import smart_reward.hf as hf
+import smart_reward.rollout as rollout_module
 from smart_reward.experiment import TrainingTensorData
 from smart_reward.hf import ExactTokenCandidates, FixedALoRASetup
 from smart_reward.metrics import policy_reward_moment
@@ -79,6 +80,28 @@ def test_policy_direction_matches_full_matrix_covariance_formula() -> None:
     assert result.fisher_curvature == pytest.approx(torch.dot(expected, fisher @ expected).item())
     assert result.pcg_converged
     json.dumps(result.to_dict(), allow_nan=False)
+
+
+def test_policy_direction_preserves_low_rank_plus_damping_krylov_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_pcg = rollout_module.pcg
+    observed_preconditioners: list[torch.Tensor | None] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_preconditioners.append(kwargs.get("inverse_diagonal"))
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(rollout_module, "pcg", recording_pcg)
+    policy_direction_from_head(
+        _training_data(),
+        torch.tensor([0.7, -0.2], dtype=torch.float64),
+        relative_damping=0.3,
+        pcg_tolerance=1.0e-13,
+        pcg_absolute_tolerance=1.0e-14,
+    )
+
+    assert observed_preconditioners == [None]
 
 
 class _TinyFixedAPolicy(nn.Module):

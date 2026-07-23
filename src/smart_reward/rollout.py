@@ -234,7 +234,9 @@ def policy_direction_from_head(
     solve = pcg(
         damped_fisher.matvec,
         right_hand_side,
-        inverse_diagonal=damped_fisher.inverse_diagonal(),
+        # Preserve the low-rank-plus-isotropic-damping spectrum instead of
+        # breaking it with a coordinate-wise Jacobi rescaling.
+        inverse_diagonal=None,
         max_iterations=pcg_max_iterations,
         tolerance=tolerance,
         absolute_tolerance=absolute_tolerance,

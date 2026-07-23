@@ -601,9 +601,11 @@ $$
 u\longmapsto\frac1{n_F}S^\top(Su)+\lambda u,
 $$
 
-无需形成 `d x d` Fisher。主配置固定 relative tolerance `1e-5`、最多 100 iterations，并使用
-damped Fisher diagonal 的 Jacobi preconditioner。最终 evidence 保存真实 `rhs-Ax` residual；
-未收敛是 fail-closed condition，不是 warning。
+无需形成 `d x d` Fisher。这里的系统是 rank 至多 `n_F` 的 empirical Fisher 加 isotropic
+damping；unpreconditioned CG 保留其“低秩 + 重复 `lambda` 特征值”结构。坐标级 Jacobi scaling
+会把这个重复特征值打散，因此 controlled path 明确不使用 Jacobi。主配置固定 relative
+tolerance `1e-5`、最多 2048 iterations；上限只是 fail-closed ceiling，达到容差就立即停止。
+最终 evidence 保存真实 `rhs-Ax` residual；未收敛是 fail-closed condition，不是 warning。
 
 ### 7.2 三个 scalar 必须分开
 

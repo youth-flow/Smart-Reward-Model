@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import torch
 
-from .linear import fisher_diagonal as score_fisher_diagonal
 from .linear import fisher_matvec as score_fisher_matvec
 from .pcg import pcg
 
@@ -183,7 +182,10 @@ def _resolve_fisher_geometry(
     if fisher_operator is None:
         return (
             lambda vector: score_fisher_matvec(vector, flat_scores, damping=0.0),
-            score_fisher_diagonal(flat_scores, damping=0.0),
+            # The default empirical Fisher is low rank plus isotropic damping.
+            # Retaining that spectrum is substantially better conditioned for
+            # CG than applying a coordinate-wise Jacobi rescaling.
+            None,
         )
     if not callable(fisher_operator):
         raise TypeError("fisher_operator must be callable")

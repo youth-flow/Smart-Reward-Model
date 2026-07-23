@@ -95,6 +95,26 @@ def test_legacy_srm_api_names_alias_canonical_prorm_api() -> None:
     assert evaluate_srm_plus is evaluate_prorm_plus
 
 
+def test_prorm_dual_preserves_low_rank_plus_damping_krylov_structure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_pcg = training_module.pcg
+    observed_preconditioners: list[torch.Tensor | None] = []
+
+    def recording_pcg(*args, **kwargs):
+        observed_preconditioners.append(kwargs.get("inverse_diagonal"))
+        return original_pcg(*args, **kwargs)
+
+    monkeypatch.setattr(training_module, "pcg", recording_pcg)
+    evaluate_prorm_plus(
+        FrozenFeatureLinearReward(2, dtype=torch.float64),
+        _misspecified_toy(),
+        _prorm_config(),
+    )
+
+    assert observed_preconditioners == [None]
+
+
 def test_frozen_feature_head_is_bias_free_zero_or_explicitly_initialized() -> None:
     zero_model = FrozenFeatureLinearReward(3, dtype=torch.float64)
     assert list(dict(zero_model.named_parameters())) == ["weight"]

@@ -187,9 +187,13 @@ $$
 | Finite sample, `lambda>0` | Ridge-regularized empirical surrogate |
 | `c in {1e-4,1e-3,1e-2}` | Preregistered damping sensitivity, not post-hoc tuning |
 
-PCG solves `(F_hat + lambda*I)v=m_hat` without forming a dense Fisher. The reported quadratic value and
-the detached envelope surrogate differ by a factor of two in value but yield the correct gradient; the
-derivation and tests are documented in [theory.md](docs/theory.md).
+PCG solves `(F_hat + lambda*I)v=m_hat` without forming a dense Fisher. Because this operator is a
+low-rank empirical Fisher plus isotropic damping, the controlled path deliberately uses
+unpreconditioned CG: coordinate-wise Jacobi scaling destroys the repeated damping eigenvalue. The
+relative-residual tolerance is `1e-5`; the `2048`-iteration cap is only a fail-closed ceiling and does
+not replace early convergence. The reported quadratic value and the detached envelope surrogate differ
+by a factor of two in value but yield the correct gradient; the derivation and tests are documented in
+[theory.md](docs/theory.md).
 
 ## 4. Controlled Phase 1 experiment
 

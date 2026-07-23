@@ -622,10 +622,10 @@ $PRORM_PROJECT_ROOT/runs/controlled-main/<main-config-hash>/aggregate/
 ```
 
 当前 locked `configs/main.yaml` 在 committed `configs/identities.json` 中的 semantic hash 为
-`aa2a6a075ee52423e7660e14f87efcf89525a9fe5cf2f5bac991477cfeca2481`。执行最终文件验收：
+`7b3f12ba1c2b6f73deb8ca2fe0da303424f108876fb4a0ad12e68df312cbf7b2`。执行最终文件验收：
 
 ```bash
-main_config_hash=aa2a6a075ee52423e7660e14f87efcf89525a9fe5cf2f5bac991477cfeca2481
+main_config_hash=7b3f12ba1c2b6f73deb8ca2fe0da303424f108876fb4a0ad12e68df312cbf7b2
 aggregate_dir="${PRORM_PROJECT_ROOT}/runs/controlled-main/${main_config_hash}/aggregate"
 test -d "${aggregate_dir}"
 test -f "${aggregate_dir}/SUCCESS"

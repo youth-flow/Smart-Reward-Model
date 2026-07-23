@@ -549,7 +549,11 @@ def _solve_prorm_dual(
     result = pcg(
         operator.matvec,
         moment,
-        inverse_diagonal=operator.inverse_diagonal(),
+        # The empirical Fisher is low rank plus isotropic damping.  Jacobi
+        # scaling destroys the large repeated damping eigenvalue and is
+        # markedly worse for this geometry; unpreconditioned CG preserves the
+        # rank(S)+1 Krylov structure.
+        inverse_diagonal=None,
         x0=warm_start,
         max_iterations=config.pcg_max_iterations,
         tolerance=config.pcg_tolerance,
