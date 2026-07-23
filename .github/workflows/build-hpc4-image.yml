@@ -1,0 +1,262 @@
+name: build-hpc4-image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-hpc4-image.yml"
+      - "containers/prorm-hpc4.def"
+      - "containers/requirements-hpc4.lock"
+      - "pyproject.toml"
+      - "src/**"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hpc4-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  APPTAINER_VERSION: "1.5.2"
+  APPTAINER_DEB_SHA256: "b5ea4ddbb7db2bfd396b4e64adaedb75d990fc7efd851189472899a1bd521d89"
+  GHCR_PACKAGE: "ghcr.io/youth-flow/smart-reward-model-hpc4"
+  GHCR_PACKAGE_PATH: "youth-flow/smart-reward-model-hpc4"
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Check out the exact source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Verify repository identity and free build space
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${GITHUB_SHA}"
+          test -z "$(git status --porcelain --untracked-files=normal)"
+          test "$(uname -m)" = "x86_64"
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
+
+      - name: Install the pinned Apptainer builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          deb="${RUNNER_TEMP}/apptainer.deb"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "${deb}" \
+            "https://github.com/apptainer/apptainer/releases/download/v${APPTAINER_VERSION}/apptainer_${APPTAINER_VERSION}_amd64.deb"
+          printf '%s  %s\n' "${APPTAINER_DEB_SHA256}" "${deb}" \
+            | sha256sum --check --strict
+          sudo apt-get update
+          sudo apt-get install -y "${deb}"
+          test "$(apptainer version)" = "${APPTAINER_VERSION}"
+
+      - name: Build the reproducible candidate SIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p \
+            "${RUNNER_TEMP}/apptainer-cache" \
+            "${RUNNER_TEMP}/apptainer-tmp" \
+            dist
+          export APPTAINER_CACHEDIR="${RUNNER_TEMP}/apptainer-cache"
+          export APPTAINER_TMPDIR="${RUNNER_TEMP}/apptainer-tmp"
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${GITHUB_SHA}")"
+          lock_sha256="$(
+            sha256sum containers/requirements-hpc4.lock | awk '{print $1}'
+          )"
+          sudo --preserve-env=APPTAINER_CACHEDIR,APPTAINER_TMPDIR,SOURCE_DATE_EPOCH \
+            apptainer build \
+            --arch amd64 \
+            --reproducible \
+            --build-arg "GIT_COMMIT=${GITHUB_SHA}" \
+            --build-arg "LOCK_SHA256=${lock_sha256}" \
+            dist/prorm-hpc4.sif containers/prorm-hpc4.def \
+            2>&1 | tee dist/apptainer-build.log
+          sudo chown "$(id -u):$(id -g)" dist/prorm-hpc4.sif
+
+      - name: Validate and describe the candidate SIF
+        shell: bash
+        run: |
+          set -euo pipefail
+          apptainer test dist/prorm-hpc4.sif
+          apptainer exec --cleanenv dist/prorm-hpc4.sif python - <<'PY'
+          from importlib.metadata import version
+          import json
+          import torch
+          import transformers
+
+          payload = {
+              "pip": version("pip"),
+              "torch": version("torch"),
+              "torch_cuda": torch.version.cuda,
+              "transformers": transformers.__version__,
+              "cuda_available_on_cpu_builder": torch.cuda.is_available(),
+          }
+          print(json.dumps(payload, sort_keys=True))
+          assert payload["torch"].split("+", 1)[0] == "2.7.1"
+          assert payload["torch_cuda"] == "12.6"
+          assert payload["transformers"] == "4.52.3"
+          PY
+          apptainer exec --cleanenv dist/prorm-hpc4.sif \
+            python -m pip freeze --all | LC_ALL=C sort > dist/pip-freeze.txt
+          apptainer inspect --json dist/prorm-hpc4.sif > dist/apptainer-inspect.json
+          apptainer exec --cleanenv dist/prorm-hpc4.sif python -m pip check
+
+      - name: Publish the SIF as an ORAS artifact
+        id: publish
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          authfile="${RUNNER_TEMP}/apptainer-auth.json"
+          tag="git-${GITHUB_SHA}"
+          uri="oras://${GHCR_PACKAGE}:${tag}"
+          printf '%s' "${GITHUB_TOKEN}" \
+            | apptainer registry login \
+                --authfile "${authfile}" \
+                --username "${GITHUB_ACTOR}" \
+                --password-stdin \
+                oras://ghcr.io
+          apptainer push --authfile "${authfile}" dist/prorm-hpc4.sif "${uri}"
+          rm -f -- "${authfile}"
+
+          token="$(
+            curl --fail --silent --show-error \
+              --user "${GITHUB_ACTOR}:${GITHUB_TOKEN}" \
+              --get \
+              --data-urlencode "service=ghcr.io" \
+              --data-urlencode "scope=repository:${GHCR_PACKAGE_PATH}:pull" \
+              https://ghcr.io/token \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+          )"
+          headers="${RUNNER_TEMP}/manifest.headers"
+          curl --fail --silent --show-error \
+            --dump-header "${headers}" \
+            --output "${RUNNER_TEMP}/manifest.json" \
+            --header "Authorization: Bearer ${token}" \
+            --header "Accept: application/vnd.oci.image.manifest.v1+json" \
+            "https://ghcr.io/v2/${GHCR_PACKAGE_PATH}/manifests/${tag}"
+          manifest_digest="$(
+            awk 'tolower($1)=="docker-content-digest:" {gsub("\r", "", $2); print $2}' \
+              "${headers}" | tail -n 1
+          )"
+          [[ "${manifest_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          observed_manifest_digest="$(
+            sha256sum "${RUNNER_TEMP}/manifest.json" | awk '{print "sha256:" $1}'
+          )"
+          test "${observed_manifest_digest}" = "${manifest_digest}"
+          sif_sha256="$(sha256sum dist/prorm-hpc4.sif | awk '{print $1}')"
+          [[ "${sif_sha256}" =~ ^[0-9a-f]{64}$ ]]
+          sif_size="$(stat -c '%s' dist/prorm-hpc4.sif)"
+          python - "${RUNNER_TEMP}/manifest.json" "${sif_sha256}" "${sif_size}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], "r", encoding="utf-8") as stream:
+              manifest = json.load(stream)
+          expected_digest = "sha256:" + sys.argv[2]
+          expected_size = int(sys.argv[3])
+          assert manifest["schemaVersion"] == 2
+          assert manifest["mediaType"] == "application/vnd.oci.image.manifest.v1+json"
+          assert len(manifest["layers"]) == 1
+          layer = manifest["layers"][0]
+          assert layer["mediaType"] == "application/vnd.sylabs.sif.layer.v1.sif"
+          assert layer["digest"] == expected_digest
+          assert layer["size"] == expected_size
+          PY
+          {
+            printf 'manifest_digest=%s\n' "${manifest_digest}"
+            printf 'sif_sha256=%s\n' "${sif_sha256}"
+            printf 'tag=%s\n' "${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Prove anonymous GHCR pull authorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          public_token="$(
+            curl --fail --silent --show-error \
+              --get \
+              --data-urlencode "service=ghcr.io" \
+              --data-urlencode "scope=repository:${GHCR_PACKAGE_PATH}:pull" \
+              https://ghcr.io/token \
+            | python -c 'import json,sys; print(json.load(sys.stdin)["token"])'
+          )"
+          headers="${RUNNER_TEMP}/public-manifest.headers"
+          curl --fail --silent --show-error \
+            --dump-header "${headers}" \
+            --output /dev/null \
+            --header "Authorization: Bearer ${public_token}" \
+            --header "Accept: application/vnd.oci.image.manifest.v1+json" \
+            "https://ghcr.io/v2/${GHCR_PACKAGE_PATH}/manifests/${{ steps.publish.outputs.manifest_digest }}"
+          observed="$(
+            awk 'tolower($1)=="docker-content-digest:" {gsub("\r", "", $2); print $2}' \
+              "${headers}" | tail -n 1
+          )"
+          test "${observed}" = "${{ steps.publish.outputs.manifest_digest }}"
+
+      - name: Freeze build evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            containers/prorm-hpc4.def \
+            containers/requirements-hpc4.lock \
+            dist/apptainer-build.log \
+            dist/apptainer-inspect.json \
+            dist/pip-freeze.txt \
+            dist/prorm-hpc4.sif \
+            > dist/SHA256SUMS
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          payload = {
+              "schema_version": "prorm-hpc4-image/v1",
+              "git_commit": os.environ["GITHUB_SHA"],
+              "package": os.environ["GHCR_PACKAGE"],
+              "tag": "git-" + os.environ["GITHUB_SHA"],
+              "manifest_digest": "${{ steps.publish.outputs.manifest_digest }}",
+              "sif_sha256": "${{ steps.publish.outputs.sif_sha256 }}",
+              "base_digest": "sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3",
+              "builder": "apptainer==1.5.2",
+          }
+          Path("dist/build-metadata.json").write_text(
+              json.dumps(payload, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          cat dist/build-metadata.json
+          {
+            echo "### HPC4 candidate image"
+            echo
+            echo "- Git commit: \`${GITHUB_SHA}\`"
+            echo "- ORAS: \`oras://${GHCR_PACKAGE}@${{ steps.publish.outputs.manifest_digest }}\`"
+            echo "- SIF SHA256: \`${{ steps.publish.outputs.sif_sha256 }}\`"
+            echo "- Anonymous GHCR pull authorization: passed"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload compact build evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hpc4-image-evidence-${{ github.sha }}
+          path: |
+            dist/SHA256SUMS
+            dist/apptainer-build.log
+            dist/apptainer-inspect.json
+            dist/build-metadata.json
+            dist/pip-freeze.txt
+          if-no-files-found: error
+          retention-days: 90

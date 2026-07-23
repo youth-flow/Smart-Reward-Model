@@ -1,0 +1,100 @@
+Bootstrap: docker
+From: docker.io/pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime@sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3
+
+%labels
+    org.opencontainers.image.title "ProRM HPC4 runtime"
+    org.opencontainers.image.description "Digest-locked runtime for Prospective Reward Modeling experiments"
+    org.opencontainers.image.source "https://github.com/youth-flow/Smart-Reward-Model"
+    org.opencontainers.image.revision "{{ GIT_COMMIT }}"
+    org.opencontainers.image.base.name "docker.io/pytorch/pytorch:2.7.1-cuda12.6-cudnn9-runtime"
+    org.opencontainers.image.base.digest "sha256:2b59b1b91885677814f78be1f8df48a25d5dc952eb6580eaecfefca510f9afd3"
+    prorm.requirements.sha256 "{{ LOCK_SHA256 }}"
+    prorm.python.version "3.11"
+    prorm.torch.version "2.7.1"
+    prorm.cuda.version "12.6"
+    prorm.transformers.version "4.52.3"
+
+%files
+    containers/requirements-hpc4.lock /opt/prorm/containers/requirements-hpc4.lock
+    pyproject.toml /opt/prorm/pyproject.toml
+    README.md /opt/prorm/README.md
+    src /opt/prorm/src
+
+%post
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y --no-install-recommends ca-certificates git
+    rm -rf /var/lib/apt/lists/*
+
+    python -m pip install --no-cache-dir \
+        pip==24.3.1 \
+        setuptools==75.6.0 \
+        wheel==0.45.1
+    python -m pip install --no-cache-dir --only-binary=:all: --no-deps \
+        -r /opt/prorm/containers/requirements-hpc4.lock
+    python -m pip install --no-cache-dir --no-deps --no-build-isolation /opt/prorm
+    python -m pip check
+
+%environment
+    export LC_ALL=C.UTF-8
+    export LANG=C.UTF-8
+    export PYTHONNOUSERSITE=1
+    export PYTHONDONTWRITEBYTECODE=1
+    export PYTHONUNBUFFERED=1
+    export TOKENIZERS_PARALLELISM=false
+
+%test
+    set -eu
+    python - <<'PY'
+from importlib.metadata import version
+
+import torch
+import transformers
+from datasets import DownloadConfig
+from peft import LoraConfig, get_peft_model
+from safetensors.torch import load, save
+from transformers import (
+    Qwen2ForCausalLM,
+    Qwen3Config,
+    Qwen3ForSequenceClassification,
+)
+
+expected = {
+    "accelerate": "1.7.0",
+    "datasets": "3.6.0",
+    "huggingface-hub": "0.31.4",
+    "numpy": "1.26.4",
+    "peft": "0.15.2",
+    "pyarrow": "17.0.0",
+    "safetensors": "0.5.3",
+    "tokenizers": "0.21.1",
+    "transformers": "4.52.3",
+}
+observed = {name: version(name) for name in expected}
+if observed != expected:
+    raise SystemExit(f"package lock mismatch: {observed!r}")
+if version("torch").split("+", 1)[0] != "2.7.1":
+    raise SystemExit(f"torch mismatch: {version('torch')}")
+if torch.version.cuda != "12.6":
+    raise SystemExit(f"compiled CUDA mismatch: {torch.version.cuda!r}")
+if transformers.__version__ != "4.52.3":
+    raise SystemExit(f"Transformers mismatch: {transformers.__version__}")
+if not all(
+    item is not None
+    for item in (
+        Qwen2ForCausalLM,
+        Qwen3Config,
+        Qwen3ForSequenceClassification,
+        DownloadConfig,
+        LoraConfig,
+        get_peft_model,
+        load,
+        save,
+    )
+):
+    raise SystemExit("required runtime symbol is unavailable")
+print("container CPU contract passed")
+PY
+    python -m pip check
+    git --version

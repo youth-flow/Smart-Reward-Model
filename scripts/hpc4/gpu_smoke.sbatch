@@ -192,28 +192,106 @@ apptainer exec --cleanenv --nv \
   "${container_visibility[@]}" \
   "${PRORM_IMAGE}" \
   python - <<'PY' | tee -a "${report}"
+import sys
+from importlib.metadata import version
+
 import torch
 import transformers
-from importlib.metadata import version
-from packaging.version import Version
+from datasets import DownloadConfig
+from peft import LoraConfig, get_peft_model
+from safetensors.torch import load, save
+from transformers import (
+    AutoModelForSequenceClassification,
+    GenerationConfig,
+    Qwen2ForCausalLM,
+    Qwen3Config,
+    Qwen3ForSequenceClassification,
+)
 
+print("python", sys.version)
 print("torch", torch.__version__)
 print("cuda", torch.version.cuda)
 print("cuda_available", torch.cuda.is_available())
 print("gpu_count", torch.cuda.device_count())
 print("transformers", transformers.__version__)
-for package in ("accelerate", "datasets", "peft", "safetensors"):
+for package in (
+    "accelerate",
+    "datasets",
+    "huggingface-hub",
+    "numpy",
+    "peft",
+    "pyarrow",
+    "safetensors",
+    "tokenizers",
+):
     print(package, version(package))
+expected = {
+    "accelerate": "1.7.0",
+    "datasets": "3.6.0",
+    "huggingface-hub": "0.31.4",
+    "numpy": "1.26.4",
+    "peft": "0.15.2",
+    "pyarrow": "17.0.0",
+    "safetensors": "0.5.3",
+    "tokenizers": "0.21.1",
+    "transformers": "4.52.3",
+}
+observed = {name: version(name) for name in expected}
+if observed != expected:
+    raise SystemExit(f"GPU smoke failed: package lock mismatch: {observed!r}")
+if version("torch").split("+", 1)[0] != "2.7.1":
+    raise SystemExit(f"GPU smoke failed: expected torch 2.7.1, got {version('torch')}")
+if sys.version_info[:2] != (3, 11):
+    raise SystemExit(f"GPU smoke failed: expected Python 3.11, got {sys.version}")
+if torch.version.cuda != "12.6":
+    raise SystemExit(f"GPU smoke failed: expected compiled CUDA 12.6, got {torch.version.cuda!r}")
 if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
     raise SystemExit("GPU smoke failed: CUDA GPU is not visible inside the image")
 if torch.cuda.device_count() != 1:
     raise SystemExit("GPU smoke failed: exactly one allocated GPU must be visible")
-if not hasattr(transformers, "Qwen3ForSequenceClassification"):
-    raise SystemExit("GPU smoke failed: Transformers lacks the pinned Qwen3 oracle class")
-if not Version("4.52.3") <= Version(transformers.__version__) < Version("5"):
-    raise SystemExit("GPU smoke failed: Transformers version is outside [4.52.3, 5)")
-x = torch.arange(16, device="cuda", dtype=torch.float32)
-print("cuda_sum", x.sum().item())
+gpu_name = torch.cuda.get_device_name(0)
+capability = torch.cuda.get_device_capability(0)
+architectures = torch.cuda.get_arch_list()
+print("gpu_name", gpu_name)
+print("compute_capability", capability)
+print("compiled_architectures", architectures)
+if "L20" not in gpu_name:
+    raise SystemExit(f"GPU smoke failed: expected NVIDIA L20, got {gpu_name!r}")
+if capability != (8, 9):
+    raise SystemExit(f"GPU smoke failed: expected compute capability (8, 9), got {capability!r}")
+if AutoModelForSequenceClassification._model_mapping[Qwen3Config] is not Qwen3ForSequenceClassification:
+    raise SystemExit("GPU smoke failed: Qwen3 sequence-classification auto mapping is wrong")
+required_symbols = (
+    Qwen2ForCausalLM,
+    Qwen3Config,
+    Qwen3ForSequenceClassification,
+    DownloadConfig,
+    LoraConfig,
+    get_peft_model,
+)
+if any(symbol is None for symbol in required_symbols):
+    raise SystemExit("GPU smoke failed: a required Qwen/PEFT/Datasets symbol is unavailable")
+generation = GenerationConfig()
+for field in (
+    "stop_strings",
+    "dola_layers",
+    "min_p",
+    "token_healing",
+    "watermarking_config",
+):
+    if not hasattr(generation, field):
+        raise SystemExit(f"GPU smoke failed: GenerationConfig lacks {field}")
+roundtrip = load(save({"x": torch.arange(8, dtype=torch.float32)}))
+if not torch.equal(roundtrip["x"], torch.arange(8, dtype=torch.float32)):
+    raise SystemExit("GPU smoke failed: safetensors round trip changed data")
+a = torch.randn(256, 256, device="cuda", dtype=torch.float32, requires_grad=True)
+b = torch.randn(256, 256, device="cuda", dtype=torch.float32, requires_grad=True)
+loss = (a @ b).square().mean()
+loss.backward()
+torch.cuda.synchronize()
+if not torch.isfinite(loss) or a.grad is None or b.grad is None:
+    raise SystemExit("GPU smoke failed: CUDA FP32 forward/backward is invalid")
+print("cuda_fp32_loss", loss.item())
 PY
 
 apptainer exec --cleanenv "${PRORM_IMAGE}" git --version | tee -a "${report}"

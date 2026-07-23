@@ -1,6 +1,7 @@
 # Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret
 
 [![CI](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/ci.yml)
+[![HPC4 image](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml/badge.svg)](https://github.com/youth-flow/Smart-Reward-Model/actions/workflows/build-hpc4-image.yml)
 
 Preference likelihood asks whether a reward model explains past labels. **Prospective Reward Modeling
 (ProRM)** instead asks what the downstream policy optimizer will do with that reward model. The method
@@ -35,7 +36,8 @@ method terminology is ProRM/ProRM+.
 | Mathematical specification, numerical core, real-model pipeline, immutable artifacts, aggregation | Implemented |
 | Automated test suite | Implemented; synthetic runs validate the pipeline, not an effect claim |
 | Slurm/Apptainer probe, staging, submission and runtime control plane | Implemented |
-| Driver-selected image definition/build | Pending the first HPC4 host probe; no generic image is claimed |
+| HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
+| Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 candidate |
 | HPC4-validated `.sif`, environment lock and offline Hugging Face cache | **Not yet frozen** |
 | Pinned Qwen/Skywork GPU smoke and five-seed main experiment | **Not yet run** |
 | “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
@@ -338,21 +340,35 @@ bash scripts/hpc4/preflight.sh
 bash scripts/hpc4/submit_host_gpu_probe.sh gpu-l20
 ```
 
-Wait for that job to complete and inspect
-`$PRORM_PROJECT_ROOT/system-reports/host-gpu-probe-<job-id>.txt`. The report determines the CUDA/PyTorch
-base. A definition committed after that decision, its build log, and its SHA256 produce a **candidate**
-image; it becomes **validated** only after `submit_gpu_smoke.sh` passes on the selected partition. The
-repository intentionally does not call an untested generic CUDA image validated.
+The completed gate is job `1640437`. It observed one NVIDIA L20 (46,068 MiB), driver `570.211.01` and
+maximum supported CUDA 12.8. The resulting candidate is therefore the digest-locked
+PyTorch 2.7.1/CUDA 12.6 definition in
+[`containers/prorm-hpc4.def`](containers/prorm-hpc4.def), with the exact Python package lock in
+[`containers/requirements-hpc4.lock`](containers/requirements-hpc4.lock).
 
-With the candidate image built on an approved Apptainer build endpoint and copied to `images/prorm.sif`,
-stage both locked configs and preserve their logs:
+HPC4 cannot build the definition locally because its Apptainer installation has no SUID builder,
+subuid/subgid mapping or user namespaces. The dedicated GitHub workflow builds the raw SIF, records
+build evidence and publishes it through public GHCR ORAS. Pull the artifact by the build commit; the
+fetcher resolves and verifies the OCI manifest digest and requires the local SIF SHA256 to equal the
+manifest's SIF-layer digest:
 
 ```bash
+git_commit="$(git rev-parse HEAD)"
+bash scripts/hpc4/fetch_candidate_image.sh "${git_commit}"
+
 export PRORM_IMAGE=images/prorm.sif
 export PRORM_HF_CACHE=hf-cache
 export PRORM_IMAGE_SHA256="$(
   sha256sum "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" | awk '{print $1}'
 )"
+printf '%s  %s\n' \
+  "${PRORM_IMAGE_SHA256}" "${PRORM_PROJECT_ROOT}/${PRORM_IMAGE}" \
+  | sha256sum --check
+```
+
+The downloaded SIF is still only a **candidate**. Stage both locked configs and preserve their logs:
+
+```bash
 
 repo_root="$(pwd -P)"
 cache_root="${PRORM_PROJECT_ROOT}/${PRORM_HF_CACHE}"
@@ -416,6 +432,7 @@ aggregation and scratch-retention commands.
 ```text
 Smart-Reward-Model/             # retained repository name
 ├── configs/                    # closed-schema smoke/main designs
+├── containers/                 # digest-locked HPC4 definition and exact runtime lock
 ├── docs/                       # theory, examples, protocol, HPC4 runbook
 ├── scripts/hpc4/               # preflight, driver probe, staging, GPU smoke, arrays
 ├── src/smart_reward/           # retained compatibility package
