@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 from smart_reward.config import config_hash, load_config
 
@@ -105,6 +110,47 @@ def test_hpc4_staging_and_submission_do_not_execute_images_on_login() -> None:
     assert "--no-mount home,cwd" in controlled_job
     assert "PRORM_IMAGE escaped PRORM_PROJECT_ROOT" in controlled_job
     assert "PRORM_HF_CACHE escaped PRORM_PROJECT_ROOT" in controlled_job
+    assert "[<index>|<start>-<end>]" in controlled_submit
+    assert 'array_selection="${4:-}"' in controlled_submit
+    assert (
+        "array selection must be one index or one contiguous start-end range" in controlled_submit
+    )
+    assert "array selection exceeds configured seed indices" in controlled_submit
+    assert "array selection index exceeds safe integer limit" in controlled_submit
+    assert "max_safe_array_integer=2147483647" in controlled_submit
+    assert 'array_spec="${array_start}-${array_end}%${concurrency}"' in controlled_submit
+    assert '--array="${array_spec}"' in controlled_submit
+
+
+def test_controlled_submit_rejects_wrapping_array_index_before_arithmetic() -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is unavailable on this host")
+
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.startswith(("PRORM_", "SRM_", "APPTAINER", "SINGULARITY")):
+            environment.pop(name)
+    result = subprocess.run(
+        [
+            bash,
+            str(ROOT / "scripts" / "hpc4" / "submit_controlled.sh"),
+            "configs/main.yaml",
+            "gpu-l20",
+            "12:00:00",
+            "18446744073709551620",
+        ],
+        cwd=ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert result.stderr.strip() == (
+        "error: array selection index exceeds safe integer limit 2147483647"
+    )
 
 
 def test_hpc4_formal_aggregation_is_cpu_slurm_and_commit_bound() -> None:

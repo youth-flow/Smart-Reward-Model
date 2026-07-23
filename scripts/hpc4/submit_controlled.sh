@@ -1,9 +1,48 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <config.yaml> <gpu-partition> <walltime>" >&2
+if [[ $# -lt 3 || $# -gt 4 ]]; then
+  echo "usage: $0 <config.yaml> <gpu-partition> <walltime> [<index>|<start>-<end>]" >&2
   exit 2
+fi
+array_selection="${4:-}"
+
+die() {
+  echo "error: $*" >&2
+  exit 2
+}
+
+decimal_exceeds() {
+  local value="$1" limit="$2"
+  if (( ${#value} != ${#limit} )); then
+    (( ${#value} > ${#limit} ))
+    return
+  fi
+  [[ "${value}" > "${limit}" ]]
+}
+
+# Keep every later Bash arithmetic expansion inside a conservative signed
+# integer range.  This check must precede arithmetic: otherwise sufficiently
+# large decimal CLI input can wrap to a valid configured seed index.
+max_safe_array_integer=2147483647
+array_selection_supplied=0
+array_start=0
+array_end=0
+if [[ -n "${array_selection}" ]]; then
+  array_selection_supplied=1
+  if [[ "${array_selection}" =~ ^(0|[1-9][0-9]*)(-(0|[1-9][0-9]*))?$ ]]; then
+    array_start_text="${BASH_REMATCH[1]}"
+    array_end_text="${BASH_REMATCH[3]:-${array_start_text}}"
+  else
+    die "array selection must be one index or one contiguous start-end range"
+  fi
+  if decimal_exceeds "${array_start_text}" "${max_safe_array_integer}" \
+    || decimal_exceeds "${array_end_text}" "${max_safe_array_integer}"; then
+    die "array selection index exceeds safe integer limit ${max_safe_array_integer}"
+  fi
+  array_start=$((10#${array_start_text}))
+  array_end=$((10#${array_end_text}))
+  (( array_start <= array_end )) || die "array selection start exceeds its end"
 fi
 
 resolve_compat_env() {
@@ -19,11 +58,6 @@ resolve_compat_env() {
   printf -v "${canonical}" '%s' "${resolved}"
   printf -v "${legacy}" '%s' "${resolved}"
   export "${canonical}" "${legacy}"
-}
-
-die() {
-  echo "error: $*" >&2
-  exit 2
 }
 
 reject_apptainer_control_environment() {
@@ -242,7 +276,16 @@ PY
 seed_count="${config_info[0]}"
 config_sha="${config_info[1]}"
 [[ "${seed_count}" =~ ^[1-9][0-9]*$ ]] || { echo "invalid configured seed count" >&2; exit 2; }
+decimal_exceeds "${seed_count}" "${max_safe_array_integer}" \
+  && die "configured seed count exceeds safe integer limit ${max_safe_array_integer}"
 [[ "${config_sha}" =~ ^[0-9a-f]{64}$ ]] || die "invalid configured config hash"
+
+if (( ! array_selection_supplied )); then
+  array_end=$((seed_count - 1))
+fi
+(( array_end < seed_count )) || {
+  die "array selection exceeds configured seed indices 0-$((seed_count - 1))"
+}
 
 inventory_expected="${PRORM_HF_CACHE}/inventories/${config_sha}.json"
 if ! PRORM_HF_INVENTORY="$(realpath -e -- "${inventory_expected}")"; then
@@ -278,6 +321,7 @@ else
   concurrency=1
 fi
 [[ "${concurrency}" =~ ^[1-9][0-9]*$ ]] || { echo "invalid array concurrency" >&2; exit 2; }
+array_spec="${array_start}-${array_end}%${concurrency}"
 
 for export_name in \
   PRORM_PROJECT_ROOT PRORM_SCRATCH_ROOT PRORM_IMAGE PRORM_IMAGE_SHA256 \
@@ -324,7 +368,7 @@ sbatch \
   --chdir="${repo_root}" \
   --partition="${partition}" \
   --time="${walltime}" \
-  --array="0-$((seed_count - 1))%${concurrency}" \
+  --array="${array_spec}" \
   --output="${slurm_log_dir}/%x-%A_%a.out" \
   --export="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${PRORM_PROJECT_ROOT},PRORM_SCRATCH_ROOT=${PRORM_SCRATCH_ROOT},PRORM_IMAGE=${PRORM_IMAGE},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_CONFIG=${config},PRORM_HF_CACHE=${PRORM_HF_CACHE},PRORM_REPO_ROOT=${repo_root},PRORM_GIT_COMMIT=${git_commit},PRORM_HF_INVENTORY=${PRORM_HF_INVENTORY},PRORM_HF_INVENTORY_SHA256=${PRORM_HF_INVENTORY_SHA256},SRM_PROJECT_ROOT=${SRM_PROJECT_ROOT},SRM_SCRATCH_ROOT=${SRM_SCRATCH_ROOT},SRM_IMAGE=${SRM_IMAGE},SRM_IMAGE_SHA256=${SRM_IMAGE_SHA256},SRM_CONFIG=${config},SRM_HF_CACHE=${SRM_HF_CACHE},SRM_REPO_ROOT=${repo_root},SRM_GIT_COMMIT=${git_commit},SRM_HF_INVENTORY=${SRM_HF_INVENTORY},SRM_HF_INVENTORY_SHA256=${SRM_HF_INVENTORY_SHA256}" \
   "${repo_root}/scripts/hpc4/controlled.sbatch"

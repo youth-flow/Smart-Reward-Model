@@ -39,12 +39,13 @@ method terminology is ProRM/ProRM+.
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
 | HPC4 GPU environment smoke | **Passed**, job `1640778`; image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f`; validated SIF SHA256 `d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb` |
-| Offline Hugging Face cache and config-specific inventories | Separate required gate; stage on a CPU compute node with `submit_hf_stage.sh` |
-| Pinned Qwen/Skywork controlled model smoke and five-seed main experiment | **Not yet run** |
+| Offline Hugging Face cache and config-specific inventories | **Passed** for the locked smoke/main configs, staging jobs `1641431`/`1641435` |
+| Pinned Qwen/Skywork controlled model smoke | **Passed**, job `1641441` on NVIDIA L20 (`00:03:15`); config `756270b0…47967`; source commit `c48db19` |
+| Five-seed main experiment | **Not yet run** |
 | “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
 
-The code and control plane are ready for environment closure and controlled execution. The repository does
-not yet contain formal HPC4 results.
+The code and control plane have accepted controlled-smoke evidence. The repository does not yet contain
+the five-seed formal HPC4 main result.
 
 ## 1. From future policy utility to a reward-model loss
 
@@ -455,10 +456,21 @@ bash scripts/hpc4/submit_controlled.sh \
 
 # Fill these only from the accepted smoke measurements.
 export PRORM_ARRAY_CONCURRENCY=1
-export PRORM_MAIN_WALLTIME=REPLACE_WITH_SMOKE_DERIVED_WALLTIME
+export PRORM_MAIN_WALLTIME=12:00:00
+# HPC4 l20_qos currently allows at most four submitted jobs per user.
 bash scripts/hpc4/submit_controlled.sh \
-  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}"
+  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 0-3
+# Submit index 4 only after at least one task above reaches a terminal state.
+bash scripts/hpc4/submit_controlled.sh \
+  configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 4
 ```
+
+The optional fourth argument is a zero-based configured seed index or one contiguous inclusive range.
+Omitting it submits all configured seeds. Splitting an array changes only Slurm scheduling: every task
+still resolves its seed from the same committed config and records its own numeric `SLURM_JOB_ID`.
+`PRORM_ARRAY_CONCURRENCY=1` caps each submitted array, not the whole split campaign; after index 4 is
+submitted, the documented campaign may use at most two concurrent GPUs, which is the `l20_qos`
+`MaxJobsPU=2` limit. Total GPU-hours do not increase.
 
 After all five main seeds have been individually accepted, map every configured seed to exactly one
 successful controlled job and submit aggregation to a CPU partition. Replace each value below only with
