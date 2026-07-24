@@ -160,13 +160,20 @@ def test_hpc4_formal_aggregation_is_cpu_slurm_and_commit_bound() -> None:
     # The login node only validates committed byte identities and submits a
     # CPU job. It must never execute the research image or guess a retry.
     assert "apptainer exec" not in submit
-    assert "<seed=controlled_job_id>..." in submit
+    assert "[--source-commit <full_commit>] <seed=controlled_job_id>..." in submit
     assert 'seed_job_pairs=("$@")' in submit
     assert "latest" not in submit.lower()
     assert 'identity_relative="configs/identities.json"' in submit
     assert "python3 -I -S -" in submit
     assert '"cat-file", "blob"' in submit
-    assert "worktree config bytes do not match submitted Git commit" in submit
+    assert 'source_commit="${source_commit_input:-${control_commit}}"' in submit
+    assert 'merge-base --is-ancestor \\\n  "${source_commit}" "${control_commit}"' in submit
+    assert '"${repo_root}" "${source_commit}" "${identity_relative}"' in submit
+    assert '"${source_commit}:${config_relative}"' in submit
+    assert "worktree config bytes do not match the source Git commit" in submit
+    assert "committed config bytes do not match the committed identity" in submit
+    assert "PRORM_CONTROL_COMMIT=${control_commit}" in submit
+    assert "PRORM_SOURCE_COMMIT=${source_commit}" in submit
     assert "duplicate seed mapping" in submit
     assert "controlled job ID is mapped more than once" in submit
     assert "SBATCH_*" in submit
@@ -192,14 +199,24 @@ def test_hpc4_formal_aggregation_is_cpu_slurm_and_commit_bound() -> None:
     assert "NVIDIA_VISIBLE_DEVICES" in job
     assert "SLURM_TRES_PER_NODE" in job
     assert "apptainer exec --cleanenv" in job
-    assert "--no-mount home,cwd" in job
+    assert "--no-mount home,cwd,bind-paths" in job
     assert "--nv" not in job
     assert '--pwd "${execution_repo}"' in job
     assert '--bind "${job_dir}:${job_dir},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}"' in job
     assert "git clone --quiet --no-hardlinks --no-checkout" in job
-    assert 'checkout --quiet --detach "${PRORM_GIT_COMMIT}"' in job
+    assert 'repo_head}" = "${PRORM_CONTROL_COMMIT}"' in job
+    assert (
+        'merge-base --is-ancestor \\\n  "${PRORM_SOURCE_COMMIT}" "${PRORM_CONTROL_COMMIT}"' in job
+    )
+    assert 'checkout --quiet --detach "${PRORM_SOURCE_COMMIT}"' in job
     assert "detached committed config identity differs from submission" in job
     assert "container-computed config hash differs from submitted identity" in job
+    assert '"schema_version": "prorm-aggregation-sources/v2"' in job
+    assert '"control_plane_git_commit": expected_control_commit' in job
+    assert '"source_git_commit": expected_source_commit' in job
+    assert '"schema_version": "prorm-aggregation-manifest/v2"' in job
+    assert '"control_plane": {' in job
+    assert '"aggregation_source": {' in job
 
 
 def test_hpc4_formal_aggregation_revalidates_sources_and_publishes_atomically() -> None:

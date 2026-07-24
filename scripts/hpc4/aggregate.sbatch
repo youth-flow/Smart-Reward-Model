@@ -75,7 +75,8 @@ for name in \
   PRORM_PROJECT_ROOT PRORM_SCRATCH_ROOT PRORM_IMAGE PRORM_IMAGE_SHA256 \
   PRORM_HF_CACHE PRORM_HF_INVENTORY PRORM_HF_INVENTORY_SHA256 \
   PRORM_REPO_ROOT PRORM_CONFIG_REL PRORM_CONFIG_HASH \
-  PRORM_CONFIG_FILE_SHA256 PRORM_CONFIG_SEED_COUNT PRORM_GIT_COMMIT; do
+  PRORM_CONFIG_FILE_SHA256 PRORM_CONFIG_SEED_COUNT \
+  PRORM_CONTROL_COMMIT PRORM_SOURCE_COMMIT; do
   [[ -n "${!name:-}" ]] || die "${name} is required"
 done
 [[ "$#" -gt 0 ]] || die "at least one explicit seed=controlled_job_id mapping is required"
@@ -151,8 +152,10 @@ done
   || die "PRORM_CONFIG_FILE_SHA256 must be lowercase SHA256"
 [[ "${PRORM_CONFIG_SEED_COUNT}" =~ ^[1-9][0-9]*$ ]] \
   || die "PRORM_CONFIG_SEED_COUNT must be positive"
-[[ "${PRORM_GIT_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] \
-  || die "PRORM_GIT_COMMIT must be a full lowercase object ID"
+[[ "${PRORM_CONTROL_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] \
+  || die "PRORM_CONTROL_COMMIT must be a full lowercase object ID"
+[[ "${PRORM_SOURCE_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] \
+  || die "PRORM_SOURCE_COMMIT must be a full lowercase object ID"
 [[ "$#" -eq "${PRORM_CONFIG_SEED_COUNT}" ]] \
   || die "explicit seed/job pair count differs from the submitted config identity"
 printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${PRORM_IMAGE}" \
@@ -180,15 +183,21 @@ done
 repository_top="$(git -C "${PRORM_REPO_ROOT}" rev-parse --show-toplevel)"
 [[ "${repository_top}" = "${PRORM_REPO_ROOT}" ]] || die "invalid repository root"
 repo_head="$(git -C "${PRORM_REPO_ROOT}" rev-parse --verify HEAD)"
-[[ "${repo_head}" = "${PRORM_GIT_COMMIT}" ]] \
-  || die "repository HEAD changed after submission"
+[[ "${repo_head}" = "${PRORM_CONTROL_COMMIT}" ]] \
+  || die "control-plane repository HEAD changed after submission"
 [[ -z "$(git -C "${PRORM_REPO_ROOT}" status --porcelain --untracked-files=normal)" ]] \
-  || die "aggregation requires the submitted repository to remain clean"
+  || die "aggregation requires the control-plane repository to remain clean"
 git -C "${PRORM_REPO_ROOT}" cat-file -e \
-  "${PRORM_GIT_COMMIT}^{commit}" 2>/dev/null \
-  || die "submitted Git commit is unavailable"
+  "${PRORM_CONTROL_COMMIT}^{commit}" 2>/dev/null \
+  || die "submitted control-plane Git commit is unavailable"
+git -C "${PRORM_REPO_ROOT}" cat-file -e \
+  "${PRORM_SOURCE_COMMIT}^{commit}" 2>/dev/null \
+  || die "submitted source Git commit is unavailable"
+git -C "${PRORM_REPO_ROOT}" merge-base --is-ancestor \
+  "${PRORM_SOURCE_COMMIT}" "${PRORM_CONTROL_COMMIT}" \
+  || die "source commit is not an ancestor of the control-plane commit"
 git -C "${PRORM_REPO_ROOT}" cat-file blob \
-  "${PRORM_GIT_COMMIT}:${PRORM_CONFIG_REL}" \
+  "${PRORM_SOURCE_COMMIT}:${PRORM_CONFIG_REL}" \
   | sha256sum \
   | awk '{print $1}' \
   | grep -Fx "${PRORM_CONFIG_FILE_SHA256}" >/dev/null \
@@ -229,19 +238,19 @@ cleanup_failed_staging() {
 }
 trap cleanup_failed_staging EXIT
 
-# Freeze aggregation code and config at the submitted commit. The mutable
-# login checkout is never mounted into the container.
+# Freeze aggregation Python and config at the submitted source/producer
+# commit. The later control-plane checkout is never mounted into the container.
 execution_repo="${job_dir}/source"
 git clone --quiet --no-hardlinks --no-checkout \
   "${PRORM_REPO_ROOT}" "${execution_repo}"
-git -C "${execution_repo}" checkout --quiet --detach "${PRORM_GIT_COMMIT}"
+git -C "${execution_repo}" checkout --quiet --detach "${PRORM_SOURCE_COMMIT}"
 execution_config="${execution_repo}/${PRORM_CONFIG_REL}"
 [[ -f "${execution_config}" && ! -L "${execution_config}" ]] \
   || die "config is missing from the detached execution source"
 
 assert_execution_checkout() {
-  [[ "$(git -C "${execution_repo}" rev-parse --verify HEAD)" = "${PRORM_GIT_COMMIT}" ]] \
-    || die "detached aggregation source changed from submitted commit"
+  [[ "$(git -C "${execution_repo}" rev-parse --verify HEAD)" = "${PRORM_SOURCE_COMMIT}" ]] \
+    || die "detached aggregation source changed from submitted source commit"
   [[ -z "$(git -C "${execution_repo}" status --porcelain --untracked-files=normal)" ]] \
     || die "detached aggregation source became dirty"
   printf '%s  %s\n' "${PRORM_CONFIG_FILE_SHA256}" "${execution_config}" \
@@ -303,7 +312,7 @@ PY
 
 container=(
   apptainer exec --cleanenv
-  --no-mount home,cwd
+  --no-mount home,cwd,bind-paths
   --pwd "${execution_repo}"
   --bind "${job_dir}:${job_dir},${PRORM_PROJECT_ROOT}:${PRORM_PROJECT_ROOT}"
   --env "PYTHONPATH=${execution_repo}/src"
@@ -384,7 +393,8 @@ validate_sources() {
   "${container[@]}" python - \
     "${output}" "${execution_config}" "${PRORM_CONFIG_HASH}" "${run_name}" \
     "${PRORM_PROJECT_ROOT}" "${PRORM_IMAGE_SHA256}" \
-    "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_GIT_COMMIT}" \
+    "${PRORM_HF_INVENTORY_SHA256}" "${PRORM_SOURCE_COMMIT}" \
+    "${PRORM_CONTROL_COMMIT}" \
     "${ordered_pairs[@]}" <<'PY'
 import hashlib
 import json
@@ -404,7 +414,8 @@ from smart_reward.config import config_hash, load_config
     project_raw,
     expected_image_sha,
     expected_inventory_sha,
-    expected_git_commit,
+    expected_source_commit,
+    expected_control_commit,
     *pair_args,
 ) = sys.argv[1:]
 output = Path(output_raw)
@@ -523,7 +534,7 @@ def run_environment(manifest, *, seed, expected_job):
     torch_state = manifest.get("torch")
     if not all(isinstance(value, dict) for value in (git_state, slurm, torch_state)):
         fail("run-manifest.json is missing Git/Slurm/Torch identity")
-    if git_state != {"commit": expected_git_commit, "dirty": False}:
+    if git_state != {"commit": expected_source_commit, "dirty": False}:
         fail("run-manifest.json Git identity mismatch")
     image = compatibility_value(slurm, "PRORM_IMAGE_SHA256", "SRM_IMAGE_SHA256")
     inventory = compatibility_value(
@@ -541,7 +552,7 @@ def run_environment(manifest, *, seed, expected_job):
     if (
         image != expected_image_sha
         or inventory != expected_inventory_sha
-        or commit != expected_git_commit
+        or commit != expected_source_commit
         or slurm.get("SLURM_JOB_ID") != str(expected_job)
         or slurm.get("SLURM_JOB_ACCOUNT") != "sigroup"
         or slurm.get("SLURM_JOB_PARTITION")
@@ -555,7 +566,7 @@ def run_environment(manifest, *, seed, expected_job):
         fail("run-manifest.json lacks the required formal producer identity")
     return {
         "formal": True,
-        "git_commit": expected_git_commit,
+        "git_commit": expected_source_commit,
         "image_sha256": expected_image_sha,
         "hf_inventory_sha256": expected_inventory_sha,
         "account": "sigroup",
@@ -610,7 +621,7 @@ for seed, controlled_job in pairs:
         / expected_config_hash
         / expected_image_sha
         / expected_inventory_sha
-        / expected_git_commit
+        / expected_source_commit
         / f"seed-{seed}"
     )
     require_real_directory(expected_artifact, "content-addressed artifact")
@@ -677,7 +688,7 @@ for seed, controlled_job in pairs:
         or evidence.get("config_sha256") != expected_config_hash
         or producer
         != {
-            "git_commit": expected_git_commit,
+            "git_commit": expected_source_commit,
             "image_sha256": expected_image_sha,
             "hf_inventory_sha256": expected_inventory_sha,
         }
@@ -715,9 +726,10 @@ for seed, controlled_job in pairs:
     )
 
 payload = {
-    "schema_version": "prorm-aggregation-sources/v1",
+    "schema_version": "prorm-aggregation-sources/v2",
     "config_hash": expected_config_hash,
-    "git_commit": expected_git_commit,
+    "control_plane_git_commit": expected_control_commit,
+    "source_git_commit": expected_source_commit,
     "image_sha256": expected_image_sha,
     "hf_inventory_sha256": expected_inventory_sha,
     "sources": records,
@@ -771,7 +783,8 @@ cmp -s -- "${source_records_before}" "${source_records_after}" \
 aggregate_verification="${job_dir}/aggregate-verification.json"
 "${container[@]}" python - \
   "${staging_dir}/aggregate.json" "${source_records_after}" \
-  "${aggregate_verification}" "${PRORM_CONFIG_REL}" <<'PY'
+  "${aggregate_verification}" "${PRORM_CONFIG_REL}" \
+  "${PRORM_CONTROL_COMMIT}" "${PRORM_SOURCE_COMMIT}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -781,6 +794,8 @@ aggregate_path = Path(sys.argv[1])
 records_path = Path(sys.argv[2])
 output_path = Path(sys.argv[3])
 config_relative = sys.argv[4]
+expected_control_commit = sys.argv[5]
+expected_source_commit = sys.argv[6]
 
 
 def reject_duplicates(pairs):
@@ -808,6 +823,12 @@ def read_object(path):
 aggregate = read_object(aggregate_path)
 records = read_object(records_path)
 sources = records["sources"]
+if (
+    records.get("schema_version") != "prorm-aggregation-sources/v2"
+    or records.get("control_plane_git_commit") != expected_control_commit
+    or records.get("source_git_commit") != expected_source_commit
+):
+    raise SystemExit("aggregation source/control commit identity mismatch")
 if aggregate.get("schema_version") != "paired-seed-aggregate/v2":
     raise SystemExit("aggregate has the wrong schema")
 if aggregate.get("config_hash") != records["config_hash"]:
@@ -819,8 +840,10 @@ if not environments or any(value != environments[0] for value in environments[1:
     raise SystemExit("preflight producer environments are not identical")
 if aggregate.get("environment_identity") != environments[0]:
     raise SystemExit("aggregate producer environment mismatch")
+if environments[0].get("git_commit") != expected_source_commit:
+    raise SystemExit("aggregate producer commit differs from the source commit")
 if aggregate.get("aggregation_source") != {
-    "git_commit": records["git_commit"],
+    "git_commit": records["source_git_commit"],
     "git_dirty": False,
     "config_path": config_relative,
 }:
@@ -861,8 +884,10 @@ if evidence.get("supports_pre_registered_claim") is not (
     raise SystemExit("aggregate preregistered evidence boolean is inconsistent")
 
 verification = {
-    "schema_version": "prorm-aggregate-verification/v1",
+    "schema_version": "prorm-aggregate-verification/v2",
     "status": "passed",
+    "control_plane_git_commit": expected_control_commit,
+    "source_git_commit": expected_source_commit,
     "pre_registered_evidence_status": evidence["status"],
     "producer_environment": environments[0],
 }
@@ -898,7 +923,8 @@ python3 -I -S - \
   "${aggregate_verification}" "${manifest_path}" \
   "${SLURM_JOB_ID}" "${SLURM_JOB_ACCOUNT}" "${SLURM_JOB_PARTITION}" \
   "$(hostname)" "${PRORM_CONFIG_REL}" "${PRORM_CONFIG_HASH}" \
-  "${PRORM_CONFIG_FILE_SHA256}" "${PRORM_GIT_COMMIT}" \
+  "${PRORM_CONFIG_FILE_SHA256}" "${PRORM_CONTROL_COMMIT}" \
+  "${PRORM_SOURCE_COMMIT}" \
   "${PRORM_IMAGE_SHA256}" "${PRORM_HF_INVENTORY_SHA256}" \
   "${aggregate_sha256}" "${source_validation_sha256}" "${cli_log_sha256}" <<'PY'
 import datetime
@@ -919,7 +945,8 @@ from pathlib import Path
     config_path,
     config_hash,
     config_file_sha,
-    git_commit,
+    control_commit,
+    source_commit,
     image_sha,
     inventory_sha,
     aggregate_sha,
@@ -939,8 +966,17 @@ aggregate = read_object(aggregate_raw)
 records = read_object(records_raw)
 verification = read_object(verification_raw)
 evidence = aggregate["pre_registered_evidence"]
+if (
+    records.get("schema_version") != "prorm-aggregation-sources/v2"
+    or records.get("control_plane_git_commit") != control_commit
+    or records.get("source_git_commit") != source_commit
+    or verification.get("schema_version") != "prorm-aggregate-verification/v2"
+    or verification.get("control_plane_git_commit") != control_commit
+    or verification.get("source_git_commit") != source_commit
+):
+    raise SystemExit("aggregation manifest inputs have inconsistent commit identities")
 manifest = {
-    "schema_version": "prorm-aggregation-manifest/v1",
+    "schema_version": "prorm-aggregation-manifest/v2",
     "created_at_utc": datetime.datetime.now(datetime.timezone.utc)
     .replace(microsecond=0)
     .isoformat()
@@ -957,7 +993,15 @@ manifest = {
         "config_hash": config_hash,
         "file_sha256": config_file_sha,
     },
-    "git_commit": git_commit,
+    "control_plane": {
+        "git_commit": control_commit,
+    },
+    "aggregation_source": {
+        "git_commit": source_commit,
+        "config_path": config_path,
+        "config_hash": config_hash,
+        "config_file_sha256": config_file_sha,
+    },
     "image_sha256": image_sha,
     "hf_inventory_sha256": inventory_sha,
     "seed_to_controlled_job": [
@@ -1011,8 +1055,10 @@ mv -T -- "${success_temporary}" "${staging_dir}/SUCCESS"
 
 python3 -I -S - \
   "${staging_dir}" "${aggregate_sha256}" "${manifest_sha256}" \
-  "${SLURM_JOB_ID}" <<'PY'
+  "${SLURM_JOB_ID}" "${PRORM_CONTROL_COMMIT}" \
+  "${PRORM_SOURCE_COMMIT}" <<'PY'
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -1022,6 +1068,8 @@ from pathlib import Path
 root = Path(sys.argv[1])
 expected_aggregate_sha, expected_manifest_sha = sys.argv[2:4]
 expected_job_id = sys.argv[4]
+expected_control_commit = sys.argv[5]
+expected_source_commit = sys.argv[6]
 expected_names = {
     "SUCCESS",
     "aggregate.json",
@@ -1044,6 +1092,15 @@ if sha256(root / "aggregate.json") != expected_aggregate_sha:
     raise SystemExit("aggregate.json changed before publication")
 if sha256(root / "aggregation-manifest.json") != expected_manifest_sha:
     raise SystemExit("aggregation-manifest.json changed before publication")
+manifest = json.loads((root / "aggregation-manifest.json").read_text(encoding="utf-8"))
+if (
+    manifest.get("schema_version") != "prorm-aggregation-manifest/v2"
+    or manifest.get("control_plane")
+    != {"git_commit": expected_control_commit}
+    or manifest.get("aggregation_source", {}).get("git_commit")
+    != expected_source_commit
+):
+    raise SystemExit("aggregation-manifest.json commit identity is invalid")
 if (root / "aggregate.json.sha256").read_text(encoding="utf-8") != (
     f"{expected_aggregate_sha}  aggregate.json\n"
 ):

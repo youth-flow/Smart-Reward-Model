@@ -517,6 +517,14 @@ aggregation pipeline and evidence validation completed; it does **not** mean the
 passed. The conclusion is exclusively `pre_registered_evidence.status` in `aggregate.json`, mirrored as
 `pre_registered_evidence_status=passed` or `not_passed` in `SUCCESS`.
 
+By default, the clean submission `HEAD` is both the aggregation control-plane commit and the
+source/producer commit. A later wrapper-only hotfix may instead place
+`--source-commit <full-producer-commit>` immediately after the walltime. The source must be an ancestor of
+the control-plane `HEAD`, and the worktree config bytes must still equal the source blob. Aggregation
+Python, config identities, seed manifests, and artifacts are then all validated against and executed from
+that detached source commit; `aggregation-manifest.json` records the distinct control-plane and
+aggregation-source commits.
+
 Formal jobs never use `--allow-download`. They bind the submission Git commit and config-specific cache
 inventory before allocation work begins. The run manifest records that **source Git SHA** separately from
 the validated **SIF SHA256**; it does not require the source commit to equal image-build commit

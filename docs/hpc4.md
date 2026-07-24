@@ -634,7 +634,7 @@ squeue -j "${aggregate_job}"
 接口为：
 
 ```text
-submit_aggregate.sh <main-config.yaml> <amd|intel> <walltime> <seed=controlled_job_id>...
+submit_aggregate.sh <main-config.yaml> <amd|intel> <walltime> [--source-commit <full_commit>] <seed=controlled_job_id>...
 ```
 
 submit 层要求 clean/tracked submitted commit、validated image、main config-specific inventory，
@@ -643,6 +643,15 @@ exact-commit source，要求输入映射与 `configs/main.yaml` 的五个 seeds 
 互不重复；随后复核每个 `SUCCESS` marker、manifest、artifact symlink、
 comparison/rollout/updated-JSONL hashes 以及共同 Git/image/inventory/account/partition/GPU
 identity。任一输入失败时不发布 final aggregate。
+
+默认情况下，clean submission `HEAD` 同时是 aggregation control-plane commit 与
+source/producer commit。只有 wrapper-only 后继修复需要验证既有 seed 时，才在 walltime 后显式
+传入 `--source-commit <full-producer-commit>`。该 source 必须是 control-plane `HEAD` 的祖先，
+且当前 worktree config bytes 必须与 source commit 中的 config blob 完全一致；否则提交硬失败。
+compute job 从 source commit 的 detached checkout 执行原始 aggregation Python/config，并用同一
+commit 严格校验五个 run manifest 和 artifact producer。最终
+`aggregation-manifest.json` 的 `control_plane.git_commit` 与
+`aggregation_source.git_commit` 分别记录两种身份，不能把 wrapper commit 冒充为实验来源。
 
 aggregation job 离开队列后先验收 Slurm 状态和 log：
 

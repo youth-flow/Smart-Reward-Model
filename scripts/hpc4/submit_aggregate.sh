@@ -7,13 +7,20 @@ die() {
 }
 
 if [[ $# -lt 4 ]]; then
-  die "usage: $0 <config.yaml> <cpu-partition> <walltime> <seed=controlled_job_id>..."
+  die "usage: $0 <config.yaml> <cpu-partition> <walltime> [--source-commit <full_commit>] <seed=controlled_job_id>..."
 fi
 
 config_input="$1"
 partition="$2"
 walltime="$3"
 shift 3
+source_commit_input=""
+if [[ "${1:-}" = "--source-commit" ]]; then
+  [[ "$#" -ge 3 ]] \
+    || die "--source-commit requires a full commit followed by seed/job mappings"
+  source_commit_input="$2"
+  shift 2
+fi
 seed_job_pairs=("$@")
 
 case "${partition}" in
@@ -47,8 +54,19 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] \
   || die "formal aggregation submission requires a clean repository"
-git_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
-[[ "${git_commit}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid Git HEAD"
+control_commit="$(git -C "${repo_root}" rev-parse --verify HEAD)"
+[[ "${control_commit}" =~ ^[0-9a-f]{40,64}$ ]] || die "invalid control-plane Git HEAD"
+source_commit="${source_commit_input:-${control_commit}}"
+[[ "${source_commit}" =~ ^[0-9a-f]{40,64}$ ]] \
+  || die "--source-commit must be a full lowercase Git object ID"
+resolved_source_commit="$(
+  git -C "${repo_root}" rev-parse --verify "${source_commit}^{commit}"
+)" || die "source Git commit is unavailable: ${source_commit}"
+[[ "${resolved_source_commit}" = "${source_commit}" ]] \
+  || die "--source-commit did not resolve to the exact supplied commit"
+git -C "${repo_root}" merge-base --is-ancestor \
+  "${source_commit}" "${control_commit}" \
+  || die "source commit must be the control-plane commit or one of its ancestors"
 
 config="$(realpath -e -- "${config_input}")" \
   || die "config does not exist or cannot be resolved: ${config_input}"
@@ -63,14 +81,15 @@ config_relative="$(realpath --relative-to="${repo_root}" "${config}")"
 git -C "${repo_root}" ls-files --error-unmatch -- "${config_relative}" >/dev/null \
   || die "formal config is not tracked by Git: ${config_relative}"
 
-# Resolve the experiment identity exclusively from blobs at the submitted
-# commit. The login-node Python process never imports the project or executes
+# Resolve the experiment identity exclusively from blobs at the source commit.
+# The control-plane checkout may contain a later submission wrapper, but the
+# login-node Python process never imports either project revision or executes
 # the research image.
 identity_relative="configs/identities.json"
 config_worktree_sha256="$(sha256sum -- "${config}" | awk '{print $1}')"
 identity_output="$(
   python3 -I -S - \
-    "${repo_root}" "${git_commit}" "${identity_relative}" \
+    "${repo_root}" "${source_commit}" "${identity_relative}" \
     "${config_relative}" "${config_worktree_sha256}" <<'PY'
 import hashlib
 import json
@@ -107,7 +126,7 @@ def reject_duplicates(pairs):
 config_bytes = committed_blob(config_relative)
 config_file_sha256 = hashlib.sha256(config_bytes).hexdigest()
 if config_file_sha256 != worktree_sha256:
-    raise SystemExit("worktree config bytes do not match submitted Git commit")
+    raise SystemExit("worktree config bytes do not match the source Git commit")
 payload = json.loads(
     committed_blob(identity_relative).decode("utf-8"),
     object_pairs_hook=reject_duplicates,
@@ -232,13 +251,25 @@ for value in \
   [[ "${value}" != *":"* ]] || die "unsafe Apptainer bind delimiter in path"
 done
 
-# Close the validation/submission race on the mutable login checkout. The
-# compute job performs the same identity checks again before making a detached
-# exact-commit checkout.
-[[ "$(git -C "${repo_root}" rev-parse --verify HEAD)" = "${git_commit}" ]] \
-  || die "Git HEAD changed while preparing aggregation"
+# Close the validation/submission race on the mutable control-plane checkout.
+# The compute job revalidates both commits before making a detached checkout of
+# the exact source/producer commit.
+[[ "$(git -C "${repo_root}" rev-parse --verify HEAD)" = "${control_commit}" ]] \
+  || die "control-plane Git HEAD changed while preparing aggregation"
 [[ -z "$(git -C "${repo_root}" status --porcelain --untracked-files=normal)" ]] \
-  || die "Git worktree changed while preparing aggregation"
+  || die "control-plane Git worktree changed while preparing aggregation"
+[[ "$(git -C "${repo_root}" rev-parse --verify "${source_commit}^{commit}")" = \
+  "${source_commit}" ]] \
+  || die "source Git commit changed or became unavailable while preparing aggregation"
+git -C "${repo_root}" merge-base --is-ancestor \
+  "${source_commit}" "${control_commit}" \
+  || die "source/control commit ancestry changed while preparing aggregation"
+git -C "${repo_root}" cat-file blob \
+  "${source_commit}:${config_relative}" \
+  | sha256sum \
+  | awk '{print $1}' \
+  | grep -Fx "${config_file_sha256}" >/dev/null \
+  || die "source config blob changed while preparing aggregation"
 printf '%s  %s\n' "${PRORM_IMAGE_SHA256}" "${image}" \
   | sha256sum --check --status \
   || die "image changed while preparing aggregation"
@@ -260,6 +291,6 @@ sbatch \
   --partition="${partition}" \
   --time="${walltime}" \
   --output="${slurm_log_dir}/%x-%j.out" \
-  --export="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_REPO_ROOT=${repo_root},PRORM_CONFIG_REL=${config_relative},PRORM_CONFIG_HASH=${config_hash},PRORM_CONFIG_FILE_SHA256=${config_file_sha256},PRORM_CONFIG_SEED_COUNT=${config_seed_count},PRORM_GIT_COMMIT=${git_commit}" \
+  --export="PATH=/usr/local/bin:/usr/bin:/bin,PRORM_PROJECT_ROOT=${project_root},PRORM_SCRATCH_ROOT=${scratch_root},PRORM_IMAGE=${image},PRORM_IMAGE_SHA256=${PRORM_IMAGE_SHA256},PRORM_HF_CACHE=${hf_cache},PRORM_HF_INVENTORY=${inventory},PRORM_HF_INVENTORY_SHA256=${inventory_sha256},PRORM_REPO_ROOT=${repo_root},PRORM_CONFIG_REL=${config_relative},PRORM_CONFIG_HASH=${config_hash},PRORM_CONFIG_FILE_SHA256=${config_file_sha256},PRORM_CONFIG_SEED_COUNT=${config_seed_count},PRORM_CONTROL_COMMIT=${control_commit},PRORM_SOURCE_COMMIT=${source_commit}" \
   "${repo_root}/scripts/hpc4/aggregate.sbatch" \
   "${seed_job_pairs[@]}"
