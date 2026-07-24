@@ -39,16 +39,37 @@ method terminology is ProRM/ProRM+.
 | HPC4 account/preflight and host-driver gate | Passed on `gpu-l20`, job `1640437`: NVIDIA L20, driver `570.211.01` |
 | Driver-selected image definition and exact Python version lock | Implemented; digest-locked PyTorch 2.7.1/CUDA 12.6 |
 | HPC4 GPU environment smoke | **Passed**, job `1640778`; image-build commit `b057bc9e134f1844248d655ed0f6c340af03099f`; validated SIF SHA256 `d6fc044b4fa303747908783ea057d5b8946f613bfec6a6ca301e3a02fd7719cb` |
-| Offline Hugging Face snapshots | Cached and offline-validated; replacement inventories for the current config hashes are pending |
+| Offline Hugging Face snapshots | Cached and offline-validated; main inventory SHA256 `095d5dc5e5a952be53ce07279aa7b5f1eda57a7a8b5745a1e4afa545a1f11f7c` |
 | Historical pre-fix controlled smoke | **Passed**, job `1641475` on NVIDIA L20 (`00:03:14`), but only under the superseded FP32-solver identity |
 | Superseded main attempt | Seed `20260722`, job `1641489`, failed the mandatory initial ProRM+ PCG gate: true relative residual `2.717e-5 > 1e-5` after 2048 iterations |
-| Current numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling; replacement staging/smoke/main pending |
-| Five-seed accepted main experiment | **No accepted seed or aggregate yet** |
-| “ProRM+ outperforms BT-MLE” result | **No result yet; this remains the preregistered hypothesis** |
+| Current numerical design | Main config `ae5d628e…a0df6`; FP64 policy geometry and 8192-iteration main ceiling |
+| Five-seed accepted main experiment | **Completed**; five NVIDIA L20 jobs, `14:55:11` total GPU time |
+| Formal aggregation | **Completed**, job `1645205`; source validation and atomic publication passed |
+| “ProRM+ outperforms BT-MLE” result | **Not supported** under the locked Phase-1 setting; preregistered status `not_passed` |
 
 The failed attempt produced no accepted comparison, rollout or scientific metric. Its `FAILED` marker,
 manifest and log are retained as numerical-amendment evidence; it cannot be mixed with the replacement
-five-seed campaign.
+five-seed campaign. The replacement campaign completed without numerical failures; see the
+[formal Phase 1 result](docs/phase1_results.md).
+
+## Formal Phase 1 result
+
+All differences below are `ProRM+ − BT-MLE`. The intervals are paired-bootstrap engineering decision
+intervals over the five locked seeds, not population confidence intervals or p-values.
+
+| Primary metric | Favorable sign | Paired mean | 95% engineering interval | Gate |
+|---|---:|---:|---:|---|
+| Held-out local regret | `< 0` | `-0.0091789` | `[-0.0765277, 0.0615383]` | Fail |
+| Squared Fisher direction error | `< 0` | `-0.0183622` | `[-0.1529629, 0.1230318]` | Fail |
+| Fisher cosine | `> 0` | `+0.0416380` | `[-0.0529131, 0.1316971]` | Pass under the locked mean-sign rule |
+| Matched-KL rollout improvement | `> 0` | `-0.0037335` | `[-0.0074192, -0.0006188]` | Fail |
+
+The campaign is an engineering success and a valid negative scientific result. ProRM+ has slightly
+favorable mean local-regret and Fisher-error estimates, but they are heterogeneous across seeds and their
+intervals cross zero. Its matched-KL rollout difference is unfavorable and the entire engineering interval
+lies below zero. The repository therefore does **not** claim that ProRM+ outperforms BT-MLE under this
+locked Phase-1 setting. Exact identities, per-seed values, sensitivity evidence and interpretation are in
+[docs/phase1_results.md](docs/phase1_results.md).
 
 ## 1. From future policy utility to a reward-model loss
 
@@ -291,7 +312,7 @@ not a population confidence interval or p-value.
 | Sensitivity fails or reverses | Failure remains in evidence; status is `not_passed` |
 | Only NLL/accuracy/probability MAE improves | Not evidence that ProRM+ succeeded |
 
-No such result is currently claimed.
+The completed campaign has preregistered status `not_passed`; no positive mechanism claim is made.
 
 ## 6. Local verification
 
@@ -467,9 +488,9 @@ export PRORM_SMOKE_WALLTIME=REPLACE_WITH_APPROVED_PILOT_WALLTIME
 bash scripts/hpc4/submit_controlled.sh \
   configs/smoke.yaml gpu-l20 "${PRORM_SMOKE_WALLTIME}"
 
-# Fill walltime only from the accepted replacement FP64 smoke/pilot.
+# The accepted formal campaign used a 12-hour allocation and averaged 02:59:02/seed.
 export PRORM_ARRAY_CONCURRENCY=2
-export PRORM_MAIN_WALLTIME=REPLACE_WITH_ACCEPTED_FP64_PILOT_WALLTIME
+export PRORM_MAIN_WALLTIME=12:00:00
 # HPC4 l20_qos currently allows at most four submitted jobs per user.
 bash scripts/hpc4/submit_controlled.sh \
   configs/main.yaml gpu-l20 "${PRORM_MAIN_WALLTIME}" 0-3
@@ -539,6 +560,7 @@ commands.
 | Global-to-local derivation, assumptions and contribution boundary | [docs/theory.md](docs/theory.md) |
 | Three-edge closed-form population ordering reversal | [docs/closed_form_example.md](docs/closed_form_example.md) |
 | Fixed Phase 0–1 design, metrics and artifacts | [docs/experiment_protocol.md](docs/experiment_protocol.md) |
+| Formal five-seed results and scientific conclusion | [docs/phase1_results.md](docs/phase1_results.md) |
 | HPC4 environment closure and Slurm execution | [docs/hpc4.md](docs/hpc4.md) |
 | Formal design identity | [configs/main.yaml](configs/main.yaml), [configs/identities.json](configs/identities.json) |
 

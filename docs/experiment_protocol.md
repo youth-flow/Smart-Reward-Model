@@ -1,6 +1,8 @@
 # ProRM+ 固定实验协议
 
 本文是实验执行与结果判定规格。数学定义以 [theory.md](theory.md) 为准。
+本文在观察正式结果前冻结，不因结果改写；执行记录与权威结果见
+[phase1_results.md](phase1_results.md)。
 论文标题固定为：
 
 > **Prospective Reward Modeling, Then Policy Optimization: Training Reward Models by Downstream Policy Regret**
@@ -609,3 +611,7 @@ selection analysis 必须完整报告。若给四 candidate 定义 policy probab
 $\bar\pi(j\mid x)$，无序边 $\{j,k\}$ 的权重是
 $2\bar\pi(j\mid x)\bar\pi(k\mid x)$；不得无权枚举六条边后仍称为原 candidate-policy
 objective。该阶段检验现实鲁棒性，不证明 Phase 1 的 population theorem。
+
+锁定的 Phase 1 结果为 `not_passed`，因此 CoVal 不作为本协议的 confirmatory continuation
+启动。后续 CoVal、容量扩大或新 KL 预算实验必须明确标为 exploratory，或以新的 design identity
+重新预注册。

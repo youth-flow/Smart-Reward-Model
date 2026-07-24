@@ -47,7 +47,7 @@ global downstream utility
 | `rho` | 固定的目标 prompt 分布 |
 | `pi_0=pi_{theta_0}` | 生成候选并定义局部几何的 reference policy |
 | `theta` | 下一次 policy optimization 真正允许改变的 tangent 坐标 |
-| `s_0(x,y)` | `nabla_theta log pi_theta(y|x)` 在 `theta_0` 的 sequence score |
+| `s_0(x,y)` | $\nabla_\theta\log\pi_\theta(y\mid x)$ 在 `theta_0` 的 sequence score |
 | `A_0 r` | reward 对局部 policy update 的一阶 moment |
 | `F_0` | reference policy 在同一 tangent 坐标中的 Fisher |
 | `r*`, `r_phi` | 目标/operational-oracle reward 与学习到的 reward model |
@@ -821,5 +821,7 @@ These ingredients are not individually claimed as new. The proposed combination 
    theorem or an empirical effect.
 7. Preference NLL, accuracy and probability MAE are diagnostics. A positive mechanism claim requires both
    held-out policy geometry and matched measured-KL rollout evidence.
-8. Until the pinned HPC4 runs and preregistered aggregation finish, the repository contains no empirical
-   claim that ProRM+ outperforms BT-MLE.
+8. The pinned HPC4 five-seed Phase 1 campaign has completed with preregistered status `not_passed`.
+   Consequently, the repository makes no empirical claim that ProRM+ outperforms BT-MLE under this locked
+   setting. This result does not alter the population identity above; see
+   [phase1_results.md](phase1_results.md).
